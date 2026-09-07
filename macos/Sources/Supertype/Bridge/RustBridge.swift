@@ -400,6 +400,125 @@ public final class RustEngine: ObservableObject {
         #endif
     }
 
+    // MARK: Catalog / Hardware / Dictionary (Phase 4)
+
+    public struct ModelInfo: Codable, Identifiable {
+        public var id: String
+        public var display_name: String
+        public var size_mb: UInt64
+        public var is_downloaded: Bool
+        public var quantization: String
+        public var runtime: String
+        public var local_path: String?
+        public var languages: [String]
+        public var license: String
+        public var checksum: String
+        public var is_loaded: Bool
+        public var description: String?
+        public var family: String?
+        public var download_urls: [String]?
+        public var capabilities: [String]?
+        public var min_memory_mb: UInt32?
+        public var is_default: Bool?
+        public var is_recommended: Bool?
+        public var attribution: String?
+
+        public var isRecommended: Bool { is_recommended ?? false }
+        public var isDefault: Bool { is_default ?? false }
+    }
+
+    public struct HardwareInfo: Codable {
+        public let arch: String
+        public let is_apple_silicon: Bool
+        public let cpu_cores: UInt32
+        public let memory_gb: UInt32
+        public let metal_supported: Bool
+        public let disk_free_gb: UInt32?
+    }
+
+    public func getCatalog() -> [ModelInfo] {
+        #if canImport(CSupertypeCore)
+        guard let cstr = engine_get_catalog(nil), let json = String(validatingUTF8: cstr) else { return [] }
+        engine_string_free(cstr)
+        if let data = json.data(using: .utf8), let catalog = try? JSONDecoder().decode([ModelInfo].self, from: data) {
+            return catalog
+        }
+        return []
+        #else
+        return []
+        #endif
+    }
+
+    public func getHardwareInfo() -> HardwareInfo? {
+        #if canImport(CSupertypeCore)
+        guard let cstr = engine_get_hardware_info(nil), let json = String(validatingUTF8: cstr) else { return nil }
+        engine_string_free(cstr)
+        if let data = json.data(using: .utf8) {
+            return try? JSONDecoder().decode(HardwareInfo.self, from: data)
+        }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
+    public func getRecommendedModels() -> [ModelInfo] {
+        #if canImport(CSupertypeCore)
+        guard let cstr = engine_get_recommended_models(nil), let json = String(validatingUTF8: cstr) else { return [] }
+        engine_string_free(cstr)
+        if let data = json.data(using: .utf8), let rec = try? JSONDecoder().decode([ModelInfo].self, from: data) {
+            return rec
+        }
+        return []
+        #else
+        return []
+        #endif
+    }
+
+    public func getDictionary() -> [String:String] {
+        #if canImport(CSupertypeCore)
+        guard let h = handle, let cstr = engine_get_dictionary(h), let json = String(validatingUTF8: cstr) else { return [:] }
+        engine_string_free(cstr)
+        if let data = json.data(using: .utf8), let dict = try? JSONDecoder().decode([String:String].self, from: data) {
+            return dict
+        }
+        return [:]
+        #else
+        return [:]
+        #endif
+    }
+
+    @discardableResult
+    public func upsertDictionary(phrase: String, replacement: String) -> Bool {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return false }
+        let rc = phrase.withCString { p in replacement.withCString { r in engine_upsert_dictionary(h, p, r) } }
+        return rc == 0
+        #else
+        return false
+        #endif
+    }
+
+    @discardableResult
+    public func deleteDictionary(phrase: String) -> Bool {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return false }
+        let rc = phrase.withCString { p in engine_delete_dictionary(h, p) }
+        return rc == 0
+        #else
+        return false
+        #endif
+    }
+
+    public func verifyModel(path: String, sha: String) -> Bool {
+        #if canImport(CSupertypeCore)
+        let rc = path.withCString { p in sha.withCString { s in engine_verify_model(p, s) } }
+        return rc == 0
+        #else
+        return false
+        #endif
+    }
+
     public func getSettings() -> AppSettings { settings }
 
     public func updateSettings(_ new: AppSettings) -> Bool {

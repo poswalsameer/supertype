@@ -159,6 +159,68 @@ let clr = engine_clear_history(e)
 if clr != 0 { print("FAIL clear_history"); exit(1) }
 print("✓ clear_history")
 
+// ── Phase 4: catalog, hardware, dictionary, Parakeet ─────────
+
+if let cstr = engine_get_catalog(nil), let json = String(validatingUTF8: cstr) {
+    print("✓ catalog: \(json.prefix(300))")
+    engine_string_free(cstr)
+    if !json.contains("whisper-tiny") || !json.contains("parakeet") { print("FAIL catalog missing"); exit(1) }
+    // Check quantization variants
+    if !json.contains("q4_0") { print("FAIL catalog q4_0 missing"); exit(1) }
+} else { print("FAIL get_catalog null"); exit(1) }
+
+if let cstr = engine_get_hardware_info(nil), let json = String(validatingUTF8: cstr) {
+    print("✓ hardware: \(json.prefix(200))")
+    engine_string_free(cstr)
+    if !json.contains("arch") { print("FAIL hardware"); exit(1) }
+} else { print("FAIL hardware null"); exit(1) }
+
+if let cstr = engine_get_recommended_models(nil), let json = String(validatingUTF8: cstr) {
+    print("✓ recommended: \(json.prefix(200))")
+    engine_string_free(cstr)
+} else { print("FAIL recommended null"); exit(1) }
+
+// Dictionary
+let phrase = "acme corp"
+let repl = "Acme Corp"
+let upsertRc = phrase.withCString { p in repl.withCString { r in engine_upsert_dictionary(e, p, r) } }
+if upsertRc != 0 { print("FAIL upsert dict rc=\(upsertRc)"); exit(1) }
+print("✓ dictionary upsert")
+if let cstr = engine_get_dictionary(e), let json = String(validatingUTF8: cstr) {
+    print("✓ get_dictionary: \(json.prefix(200))")
+    engine_string_free(cstr)
+    if !json.contains("acme corp") { print("FAIL dict missing \(json)"); exit(1) }
+}
+let fmtRaw = "hello acme corp comma world"
+let fmtCStr2 = fmtRaw.withCString { c in engine_format_text(e, c) }
+if let cstr = fmtCStr2, let s = String(validatingUTF8: cstr) {
+    print("✓ dict formatting: \(s)")
+    engine_string_free(cstr)
+    if !s.contains("Acme Corp") { print("FAIL dict not applied \(s)"); exit(1) }
+}
+let delRc = phrase.withCString { p in engine_delete_dictionary(e, p) }
+if delRc != 0 { print("FAIL delete dict rc=\(delRc)"); exit(1) }
+print("✓ dictionary delete")
+
+// Parakeet backend via same abstraction (create fake file >1MB and load)
+let tmpParakeet = "/tmp/supertype-test-parakeet.bin"
+let fakeData = [UInt8](repeating: 0x42, count: 2*1024*1024)
+FileManager.default.createFile(atPath: tmpParakeet, contents: Data(fakeData))
+let rcParakeet = tmpParakeet.withCString { p in engine_load_model(e, p) }
+if rcParakeet != 0 { print("FAIL parakeet load rc=\(rcParakeet)"); exit(1) }
+print("✓ parakeet load")
+if let cstr = engine_get_model_info(e), let json = String(validatingUTF8: cstr) {
+    print("✓ parakeet model_info: \(json.prefix(200))")
+    engine_string_free(cstr)
+    if !json.contains("parakeet") && !json.contains("whisper") { print("FAIL model_info"); exit(1) }
+}
+// Verify switching back to whisper via dummy
+let tmpWhisper = "/tmp/supertype-test-whisper.bin"
+FileManager.default.createFile(atPath: tmpWhisper, contents: Data(fakeData))
+let rcWhisper = tmpWhisper.withCString { p in engine_load_model(e, p) }
+if rcWhisper != 0 { print("FAIL whisper load"); exit(1) }
+print("✓ whisper reload (quantization variant)")
+
 // Settings roundtrip
 if let cstr = engine_get_settings(e), let json = String(validatingUTF8: cstr) {
     print("✓ get_settings: \(json.prefix(80))")
@@ -176,4 +238,4 @@ if rc2 == 1, let p = out, let j = String(validatingUTF8: p) {
 }
 
 engine_free(e)
-print("All FFI checks passed (Phase 1 + 2 + 3)")
+print("All FFI checks passed (Phase 1 + 2 + 3 + 4)")

@@ -48,6 +48,15 @@ int32_t engine_clear_history(Engine* ptr);
 char* engine_search_history(Engine* ptr, const char* query, int64_t limit);
 int64_t engine_get_history_count(Engine* ptr);
 
+// Catalog / hardware / dictionary (Phase 4)
+char* engine_get_catalog(Engine* ptr);
+char* engine_get_hardware_info(Engine* ptr);
+char* engine_get_recommended_models(Engine* ptr);
+int32_t engine_upsert_dictionary(Engine* ptr, const char* phrase, const char* replacement);
+char* engine_get_dictionary(Engine* ptr);
+int32_t engine_delete_dictionary(Engine* ptr, const char* phrase);
+int32_t engine_verify_model(const char* path, const char* expected_sha);
+
 // Version
 const char* engine_version(void);
 

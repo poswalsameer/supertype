@@ -7,6 +7,7 @@
 use crate::engine::events::EngineEvent;
 use std::path::{Path, PathBuf};
 
+pub mod parakeet;
 pub mod whisper;
 
 #[derive(Debug, Clone)]

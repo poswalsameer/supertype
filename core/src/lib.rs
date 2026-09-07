@@ -12,18 +12,20 @@
 pub mod audio;
 pub mod engine;
 pub mod formatting;
+pub mod hardware;
 pub mod input;
 pub mod models;
 pub mod performance;
 pub mod settings;
 pub mod storage;
+pub mod text_processor;
 pub mod transcript;
 pub mod transcription;
 
 use engine::{Engine, EngineError};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Engine handle ──────────────────────────────────────────────────
 
@@ -499,6 +501,129 @@ pub extern "C" fn engine_get_history_count(ptr: *mut Engine) -> i64 {
     }
     let engine = unsafe { &*ptr };
     engine.get_history_count()
+}
+
+#[no_mangle]
+pub extern "C" fn engine_get_catalog(ptr: *mut Engine) -> *mut c_char {
+    // ptr may be null — catalog does not require engine, but we accept null for Swift convenience
+    let catalog = crate::models::builtin_catalog();
+    match serde_json::to_string(&catalog) {
+        Ok(json) => match CString::new(json) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_get_hardware_info(_ptr: *mut Engine) -> *mut c_char {
+    let hw = crate::hardware::HardwareInfo::probe();
+    match serde_json::to_string(&hw) {
+        Ok(json) => match CString::new(json) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_get_recommended_models(ptr: *mut Engine) -> *mut c_char {
+    let hw = crate::hardware::HardwareInfo::probe();
+    let mgr = crate::models::ModelManager::with_default_dir();
+    let rec = mgr.recommended_for_hardware(&hw);
+    // Avoid unused ptr warning
+    let _ = ptr;
+    match serde_json::to_string(&rec) {
+        Ok(json) => match CString::new(json) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_upsert_dictionary(
+    ptr: *mut Engine,
+    phrase: *const c_char,
+    replacement: *const c_char,
+) -> c_int {
+    if ptr.is_null() || phrase.is_null() || replacement.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    let cstr_phrase = unsafe { CStr::from_ptr(phrase) };
+    let cstr_repl = unsafe { CStr::from_ptr(replacement) };
+    let phrase_str = match cstr_phrase.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    let repl_str = match cstr_repl.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    match engine.upsert_dictionary(phrase_str, repl_str) {
+        Ok(()) => 0,
+        Err(_) => -3,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_get_dictionary(ptr: *mut Engine) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &*ptr };
+    let dict = engine.get_dictionary();
+    match serde_json::to_string(&dict) {
+        Ok(json) => match CString::new(json) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_delete_dictionary(ptr: *mut Engine, phrase: *const c_char) -> c_int {
+    if ptr.is_null() || phrase.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    let cstr = unsafe { CStr::from_ptr(phrase) };
+    let phrase_str = match cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    match engine.delete_dictionary(phrase_str) {
+        Ok(_) => 0,
+        Err(_) => -3,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_verify_model(path: *const c_char, expected_sha: *const c_char) -> c_int {
+    if path.is_null() {
+        return -1;
+    }
+    let cstr_path = unsafe { CStr::from_ptr(path) };
+    let path_str = match cstr_path.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    let expected = if expected_sha.is_null() {
+        ""
+    } else {
+        let cstr = unsafe { CStr::from_ptr(expected_sha) };
+        cstr.to_str().unwrap_or("")
+    };
+    match crate::models::ModelManager::verify_checksum(Path::new(path_str), expected) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(_) => -3,
+    }
 }
 
 fn map_error_code(e: &EngineError) -> c_int {

@@ -18,9 +18,10 @@ struct SettingsView: View {
             permissionsTab.tabItem { Label("Permissions", systemImage: "lock.shield") }.tag("Permissions")
             historyTab.tabItem { Label("History", systemImage: "clock") }.tag("History")
             modelsTab.tabItem { Label("Models", systemImage: "cpu") }.tag("Models")
+            dictionaryTab.tabItem { Label("Vocabulary", systemImage: "book") }.tag("Dictionary")
             privacyTab.tabItem { Label("Privacy", systemImage: "hand.raised") }.tag("Privacy")
         }
-        .frame(width: 620, height: 480)
+        .frame(width: 680, height: 520)
         .padding()
         .onAppear { syncFromEngine(); hotkeyInput = engine.getSettings().globalShortcut }
         .onReceive(engine.objectWillChange) { _ in syncFromEngine() }
@@ -220,35 +221,29 @@ struct SettingsView: View {
     // MARK: Models
 
     private var modelsTab: some View {
-        Form {
-            Section("Selected Model") {
-                Picker("Model", selection: Binding(
-                    get: { engine.getSettings().selectedModelId },
-                    set: { v in var s = engine.getSettings(); s.selectedModelId = v; _ = engine.updateSettings(s) }
-                )) {
-                    Text("Whisper Tiny (39M) — fastest").tag("whisper-tiny")
-                    Text("Whisper Base (74M)").tag("whisper-base")
-                    Text("Parakeet TDT 0.6B").tag("parakeet-tdt-0.6b")
-                }
-                Text("Model catalog and on-demand downloads land in Phase 4. Switching here validates persistence and uses on-demand script.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("Storage") {
-                Text("Models are stored under Application Support/Supertype/models and via resources/models. Use ./scripts/download-model.sh.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("Current: \(engine.getSettings().selectedModelId)").font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
+        ModelCatalogView().environmentObject(engine)
+    }
+
+    private var dictionaryTab: some View {
+        DictionaryView().environmentObject(engine)
     }
 
     private var privacyTab: some View {
         Form {
             Section("Principles") {
-                Text("• Audio stays in memory → VAD → ASR → formatted text → discard. Never persisted.\n• No cloud transcription, no telemetry by default.\n• Production logs never include transcript content.\n• History can be disabled entirely and stores only formatted text.")
+                Text("• Audio stays in memory → VAD → ASR → formatted text → discard. Never persisted.\n• No cloud transcription, no telemetry by default.\n• Production logs never include transcript content.\n• History can be disabled entirely and stores only formatted text.\n• Local models run via Metal/Accelerate on this Mac.")
                     .font(.callout)
+                Label("Inference is 100% local", systemImage: "lock.shield.fill").font(.caption).foregroundStyle(.green)
             }
-            Section("Data") {
+            Section("History") {
+                HStack {
+                    Text("Save transcription history")
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { engine.getSettings().historyEnabled },
+                        set: { v in var s = engine.getSettings(); s.historyEnabled = v; _ = engine.updateSettings(s) }
+                    )).labelsHidden()
+                }
                 HStack {
                     Text("History entries: \(engine.getHistoryCount())")
                     Spacer()
@@ -259,6 +254,48 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text("When history is disabled, no transcript content is written.")
                     .font(.caption).foregroundStyle(.orange)
+            }
+            Section("Audio Recordings") {
+                HStack {
+                    Text("Save audio recordings")
+                    Spacer()
+                    Toggle("", isOn: .constant(false)).labelsHidden().disabled(true)
+                }
+                Text("Audio is never persisted by default (OFF). Raw PCM stays in memory and is discarded after transcription. This architecture guarantees privacy even without a setting.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("v1 does not implement audio saving; the toggle is for future local-only opt-in.").font(.caption2).foregroundStyle(.secondary)
+            }
+            Section("Hardware") {
+                if let hw = engine.getHardwareInfo() {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(hw.arch) · \(hw.cpu_cores) cores · \(hw.memory_gb) GB RAM · \(hw.metal_supported ? "Metal" : "Accelerate")")
+                            .font(.caption)
+                        if let rec = engine.getRecommendedModels().first {
+                            Text("Recommended: \(rec.display_name) (\(rec.size_mb) MB, \(rec.quantization))").font(.caption).foregroundStyle(.green)
+                        }
+                        if let free = hw.disk_free_gb { Text("Disk free: \(free) GB").font(.caption2).foregroundStyle(.secondary) }
+                    }
+                } else {
+                    Text("Hardware probe unavailable").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Section("Local Language Model (Future)") {
+                HStack {
+                    Text("Enhance with local LLM")
+                    Spacer()
+                    Toggle("", isOn: .constant(false)).labelsHidden().disabled(true)
+                }
+                Text("Extension point: TextProcessor → DeterministicFormatter (active) + OptionalLocalLLMProcessor (disabled, no download). Enable only after downloading a small local LLM (not bundled).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Audit") {
+                Button("Show Privacy Audit") {
+                    if let url = URL(string: "file://\(FileManager.default.currentDirectoryPath)/docs/privacy.md") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Text("Network during normal transcription: none. Only model downloads use HTTPS when you tap Download.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

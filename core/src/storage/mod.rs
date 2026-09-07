@@ -220,6 +220,17 @@ impl Storage {
         }
         Ok(map)
     }
+
+    pub fn delete_dictionary(&self, phrase: &str) -> Result<bool, String> {
+        if phrase.trim().is_empty() {
+            return Err("phrase empty".into());
+        }
+        let conn = self.conn.lock().unwrap();
+        let n = conn
+            .execute("DELETE FROM dictionary_entries WHERE phrase=?1", params![phrase])
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
 }
 
 #[cfg(test)]

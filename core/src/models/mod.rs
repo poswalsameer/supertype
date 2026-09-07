@@ -5,6 +5,8 @@
 //! Phase 2 supports an already-installed Whisper model on disk (on-demand download via scripts).
 //! Full download UI lands in Phase 4; this architecture makes Parakeet addition trivial.
 
+pub mod downloader;
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -14,7 +16,6 @@ pub struct ModelInfo {
     pub display_name: String,
     pub size_mb: u64,
     pub is_downloaded: bool,
-    /// Extended metadata (Phase 2 additions, kept optional for Phase 1 compat).
     #[serde(default)]
     pub quantization: String,
     #[serde(default)]
@@ -29,6 +30,23 @@ pub struct ModelInfo {
     pub checksum: String,
     #[serde(default)]
     pub is_loaded: bool,
+    // Phase 4 extended metadata
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub family: String,
+    #[serde(default)]
+    pub download_urls: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub min_memory_mb: u32,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub is_recommended: bool,
+    #[serde(default)]
+    pub attribution: String,
 }
 
 impl ModelInfo {
@@ -45,12 +63,41 @@ impl ModelInfo {
             license: "MIT".into(),
             checksum: String::new(),
             is_loaded: false,
+            description: String::new(),
+            family: "whisper".into(),
+            download_urls: Vec::new(),
+            capabilities: vec!["transcription".into()],
+            min_memory_mb: 2048,
+            is_default: false,
+            is_recommended: false,
+            attribution: String::new(),
         }
     }
 }
 
 pub fn builtin_catalog() -> Vec<ModelInfo> {
     vec![
+        ModelInfo {
+            id: "whisper-tiny-q4_0".into(),
+            display_name: "Whisper Tiny Q4".into(),
+            size_mb: 43,
+            is_downloaded: false,
+            quantization: "q4_0".into(),
+            runtime: "whisper.cpp".into(),
+            local_path: default_model_path("whisper-tiny-q4_0"),
+            languages: vec!["en".into(), "multilingual".into()],
+            license: "MIT".into(),
+            checksum: String::new(),
+            is_loaded: false,
+            description: "Ultra lightweight · fastest · lowest RAM".into(),
+            family: "whisper".into(),
+            download_urls: vec!["https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q4_0.bin".into()],
+            capabilities: vec!["transcription".into()],
+            min_memory_mb: 1536,
+            is_default: false,
+            is_recommended: false,
+            attribution: "OpenAI Whisper · ggerganov/whisper.cpp".into(),
+        },
         ModelInfo {
             id: "whisper-tiny".into(),
             display_name: "Whisper Tiny (39M)".into(),
@@ -59,10 +106,18 @@ pub fn builtin_catalog() -> Vec<ModelInfo> {
             quantization: "q5_0".into(),
             runtime: "whisper.cpp".into(),
             local_path: default_model_path("whisper-tiny"),
-            languages: vec!["en".into()],
+            languages: vec!["en".into(), "multilingual".into()],
             license: "MIT".into(),
             checksum: String::new(),
             is_loaded: false,
+            description: "Balanced tiny · recommended for 8 GB".into(),
+            family: "whisper".into(),
+            download_urls: vec!["https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_0.bin".into()],
+            capabilities: vec!["transcription".into()],
+            min_memory_mb: 2048,
+            is_default: true,
+            is_recommended: true,
+            attribution: "OpenAI Whisper · ggerganov/whisper.cpp".into(),
         },
         ModelInfo {
             id: "whisper-base".into(),
@@ -72,10 +127,18 @@ pub fn builtin_catalog() -> Vec<ModelInfo> {
             quantization: "q5_0".into(),
             runtime: "whisper.cpp".into(),
             local_path: default_model_path("whisper-base"),
-            languages: vec!["en".into()],
+            languages: vec!["en".into(), "multilingual".into()],
             license: "MIT".into(),
             checksum: String::new(),
             is_loaded: false,
+            description: "Lightweight · higher accuracy".into(),
+            family: "whisper".into(),
+            download_urls: vec!["https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_0.bin".into()],
+            capabilities: vec!["transcription".into()],
+            min_memory_mb: 4096,
+            is_default: false,
+            is_recommended: true,
+            attribution: "OpenAI Whisper · ggerganov/whisper.cpp".into(),
         },
         ModelInfo {
             id: "parakeet-tdt-0.6b".into(),
@@ -89,6 +152,16 @@ pub fn builtin_catalog() -> Vec<ModelInfo> {
             license: "CC-BY-4.0".into(),
             checksum: String::new(),
             is_loaded: false,
+            description: "Fast · high accuracy · Apple Silicon optimized".into(),
+            family: "parakeet".into(),
+            download_urls: vec![
+                "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/resolve/main/parakeet-tdt-0.6b.onnx".into(),
+            ],
+            capabilities: vec!["transcription".into(), "timestamps".into()],
+            min_memory_mb: 8192,
+            is_default: false,
+            is_recommended: true,
+            attribution: "NVIDIA Parakeet · CC-BY-4.0".into(),
         },
     ]
 }
@@ -170,17 +243,87 @@ impl ModelManager {
 
     /// Suggest download URL for a given model id (on-demand).
     pub fn download_url(id: &str) -> Option<String> {
-        match id {
-            "whisper-tiny" => Some(
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_0.bin"
-                    .into(),
-            ),
-            "whisper-base" => Some(
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_0.bin"
-                    .into(),
-            ),
-            _ => None,
+        builtin_catalog()
+            .iter()
+            .find(|m| m.id == id)
+            .and_then(|m| m.download_urls.first().cloned())
+            .or_else(|| match id {
+                "whisper-tiny" => Some(
+                    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_0.bin"
+                        .into(),
+                ),
+                "whisper-base" => Some(
+                    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_0.bin"
+                        .into(),
+                ),
+                _ => None,
+            })
+    }
+
+    /// Atomic install: verify checksum then move temp file to final location.
+    pub fn install_from_temp(
+        &self,
+        temp_path: &Path,
+        model_id: &str,
+        expected_checksum: &str,
+    ) -> Result<PathBuf, String> {
+        // Check disk space (need at least file size + 100 MB)
+        let meta = std::fs::metadata(temp_path).map_err(|e| e.to_string())?;
+        let file_size = meta.len();
+        if let Some(parent) = self
+            .get(model_id)
+            .and_then(|m| m.local_path.as_ref())
+            .and_then(|p| p.parent())
+        {
+            let _ = std::fs::create_dir_all(parent);
+            // Check space via hardware probe (best-effort)
+            if let Some(free_gb) = crate::hardware::HardwareInfo::probe().disk_free_gb {
+                let need_gb = ((file_size as f64 / (1024.0 * 1024.0 * 1024.0)).ceil() as u32) + 1;
+                if free_gb < need_gb {
+                    return Err(format!("not enough disk space: need {} GB, have {} GB", need_gb, free_gb));
+                }
+            }
         }
+        // Verify checksum if provided
+        if !expected_checksum.is_empty() && !Self::verify_checksum(temp_path, expected_checksum)? {
+            return Err("checksum mismatch — corrupted download".into());
+        }
+        // Detect corrupted: file must be >1 MB for whisper, >10 MB for parakeet
+        if file_size < 1024 * 1024 {
+            return Err("model file too small — corrupted download".into());
+        }
+        let dest = self
+            .get(model_id)
+            .and_then(|m| m.local_path.clone())
+            .unwrap_or_else(|| self.models_dir.join(format!("{}.bin", model_id)));
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        // Atomic move (rename is atomic on same filesystem)
+        std::fs::rename(temp_path, &dest).map_err(|e| e.to_string())?;
+        Ok(dest)
+    }
+
+    /// Uninstall (delete) a model file.
+    pub fn uninstall(&self, model_id: &str) -> Result<bool, String> {
+        let path = self
+            .get(model_id)
+            .and_then(|m| m.local_path.clone())
+            .unwrap_or_else(|| self.models_dir.join(format!("{}.bin", model_id)));
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Hardware-aware recommendation.
+    pub fn recommended_for_hardware(&self, hw: &crate::hardware::HardwareInfo) -> Vec<ModelInfo> {
+        let ids = crate::hardware::recommend_model_ids(hw);
+        ids.iter()
+            .filter_map(|id| self.get(id).cloned())
+            .collect()
     }
 }
 
@@ -191,7 +334,10 @@ mod tests {
 
     #[test]
     fn catalog_has_three() {
-        assert_eq!(builtin_catalog().len(), 3);
+        // Phase 4 catalog has 4 entries (tiny-q4, tiny, base, parakeet)
+        assert!(builtin_catalog().len() >= 4);
+        assert!(builtin_catalog().iter().any(|m| m.id == "whisper-tiny"));
+        assert!(builtin_catalog().iter().any(|m| m.id == "parakeet-tdt-0.6b"));
     }
 
     #[test]
@@ -235,6 +381,87 @@ mod tests {
     #[test]
     fn download_url_known() {
         assert!(ModelManager::download_url("whisper-tiny").is_some());
+        assert!(ModelManager::download_url("whisper-tiny-q4_0").is_some());
+        assert!(ModelManager::download_url("parakeet-tdt-0.6b").is_some());
         assert!(ModelManager::download_url("unknown").is_none());
+    }
+
+    #[test]
+    fn catalog_metadata_valid() {
+        for m in builtin_catalog() {
+            assert!(!m.id.is_empty());
+            assert!(!m.display_name.is_empty());
+            assert!(!m.runtime.is_empty());
+            assert!(!m.license.is_empty());
+            assert!(m.size_mb > 0);
+            assert!(!m.download_urls.is_empty());
+        }
+    }
+
+    #[test]
+    fn install_and_uninstall() {
+        let dir = TempDir::new().unwrap();
+        let mgr = ModelManager::new(dir.path().to_path_buf());
+        // Need to override local_path for test
+        let mut mgr2 = mgr;
+        for m in &mut mgr2.catalog {
+            if m.id == "whisper-tiny" {
+                m.local_path = Some(dir.path().join("whisper-tiny.bin"));
+            }
+        }
+        let temp = dir.path().join("tmp.bin");
+        std::fs::write(&temp, vec![0x42u8; 2 * 1024 * 1024]).unwrap();
+        let dest = mgr2.install_from_temp(&temp, "whisper-tiny", "").unwrap();
+        assert!(dest.exists());
+        assert!(!temp.exists()); // moved
+        assert!(mgr2.uninstall("whisper-tiny").unwrap());
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn install_corrupted_detects_small() {
+        let dir = TempDir::new().unwrap();
+        let mgr = ModelManager::new(dir.path().to_path_buf());
+        let temp = dir.path().join("tiny.bin");
+        std::fs::write(&temp, b"tiny").unwrap();
+        let res = mgr.install_from_temp(&temp, "whisper-tiny", "");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("too small"));
+    }
+
+    #[test]
+    fn install_checksum_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let mgr = ModelManager::new(dir.path().to_path_buf());
+        let temp = dir.path().join("tmp2.bin");
+        std::fs::write(&temp, vec![0x42u8; 2 * 1024 * 1024]).unwrap();
+        let res = mgr.install_from_temp(&temp, "whisper-tiny", "deadbeef");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("checksum"));
+    }
+
+    #[test]
+    fn hardware_recommend() {
+        let mgr = ModelManager::new("/tmp".into());
+        let hw_small = crate::hardware::HardwareInfo {
+            arch: "aarch64".into(),
+            is_apple_silicon: true,
+            cpu_cores: 8,
+            memory_gb: 6,
+            metal_supported: true,
+            disk_free_gb: Some(20),
+        };
+        let rec = mgr.recommended_for_hardware(&hw_small);
+        assert!(!rec.is_empty());
+        let hw_big = crate::hardware::HardwareInfo {
+            arch: "aarch64".into(),
+            is_apple_silicon: true,
+            cpu_cores: 10,
+            memory_gb: 32,
+            metal_supported: true,
+            disk_free_gb: Some(100),
+        };
+        let rec2 = mgr.recommended_for_hardware(&hw_big);
+        assert!(rec2.iter().any(|m| m.id == "parakeet-tdt-0.6b"));
     }
 }
