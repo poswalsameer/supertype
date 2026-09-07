@@ -23,6 +23,32 @@ pub struct Settings {
 
     /// Whether the floating recording overlay is shown.
     pub overlay_enabled: bool,
+
+    /// Hold vs toggle behavior for global shortcut: "hold" or "toggle".
+    #[serde(default = "default_shortcut_behavior")]
+    pub shortcut_behavior: String,
+
+    /// Language code, e.g. "en", "auto". "auto" lets model detect.
+    #[serde(default = "default_language")]
+    pub language: String,
+
+    /// Enable spoken-punctuation formatting.
+    #[serde(default = "default_true")]
+    pub punctuation_enabled: bool,
+
+    /// Enable sentence capitalization.
+    #[serde(default = "default_true")]
+    pub capitalization_enabled: bool,
+}
+
+fn default_shortcut_behavior() -> String {
+    "hold".to_string()
+}
+fn default_language() -> String {
+    "en".to_string()
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -34,6 +60,10 @@ impl Default for Settings {
             history_enabled: true,
             launch_at_login: false,
             overlay_enabled: true,
+            shortcut_behavior: default_shortcut_behavior(),
+            language: default_language(),
+            punctuation_enabled: true,
+            capitalization_enabled: true,
         }
     }
 }
@@ -51,6 +81,12 @@ impl Settings {
             if id.trim().is_empty() {
                 return Err("selected_microphone_id must not be empty string".into());
             }
+        }
+        if self.shortcut_behavior != "hold" && self.shortcut_behavior != "toggle" {
+            return Err("shortcut_behavior must be hold or toggle".into());
+        }
+        if self.language.trim().is_empty() {
+            return Err("language must not be empty".into());
         }
         Ok(())
     }
@@ -89,6 +125,10 @@ mod tests {
             history_enabled: false,
             launch_at_login: true,
             overlay_enabled: false,
+            shortcut_behavior: "toggle".into(),
+            language: "auto".into(),
+            punctuation_enabled: false,
+            capitalization_enabled: false,
         };
         s.validate().unwrap();
         let json = serde_json::to_string(&s).unwrap();

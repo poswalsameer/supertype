@@ -1,0 +1,16 @@
+[
+  {"id":"conv_hello","type":"conversational","raw":"hello comma world period","expected":"Hello, world."},
+  {"id":"conv_question","type":"conversational","raw":"is this a question question mark","expected":"Is this a question?"},
+  {"id":"conv_newline","type":"conversational","raw":"hello new line world","expected":"Hello\nWorld"},
+  {"id":"conv_paragraph","type":"conversational","raw":"hello new paragraph world","expected":"Hello\n\nWorld"},
+  {"id":"tech_stack","type":"technical","raw":"open parenthesis rust close parenthesis comma whisper cpp period","expected":"(Rust), whisper cpp."},
+  {"id":"programming","type":"programming","raw":"func hello open parenthesis close parenthesis colon string period","expected":"func hello(): string."},
+  {"id":"proper_noun","type":"proper","raw":"hello wisp er comma acme corp period","expected":"Hello Wispr, Acme Corp."},
+  {"id":"mixed_punct","type":"mixed","raw":"open quote hello comma world close quote period new line this is a test question mark","expected":"\"Hello, world.\"\nThis is a test?"},
+  {"id":"command_short","type":"command","raw":"new line period comma colon","expected":". , :"},
+  {"id":"short_phrase","type":"short","raw":"hi","expected":"Hi"},
+  {"id":"long_dictation","type":"long","raw":"hello comma world period hello comma world period hello comma world period","expected":"Hello, world. Hello, world. Hello, world."},
+  {"id":"dedup","type":"dedup","raw":"hello hello world world period","expected":"Hello world."},
+  {"id":"i_caps","type":"caps","raw":"i am here period","expected":"I am here."},
+  {"id":"dash","type":"punct","raw":"hello dash world","expected":"Hello - world"}
+]

@@ -1,6 +1,6 @@
 [package]
 name = "supertype-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Supertype Rust core engine — privacy-first local voice engine"
 license = "MIT"

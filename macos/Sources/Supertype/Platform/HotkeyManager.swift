@@ -89,32 +89,34 @@ final class HotkeyManager: ObservableObject {
     private func registerModifiers(with sc: HotkeyShortcut) -> Bool {
         guard let code = sc.keyCode else { return false }
         let mods = sc.modifiers
+        var toggleActive = false
 
         let handler: (NSEvent) -> Void = { [weak self] event in
             guard let self, let shortcut = self.shortcut else { return }
-            if event.type == .keyDown, !self.isKeyDown {
-                // Check modifiers + keyCode
+            if event.type == .keyDown {
                 if shortcut.matches(event: event) {
-                    self.isKeyDown = true
                     if self.mode == .hold {
-                        DispatchQueue.main.async { self.onKeyDown?() }
+                        if !self.isKeyDown {
+                            self.isKeyDown = true
+                            DispatchQueue.main.async { self.onKeyDown?() }
+                        }
                     } else {
-                        // Toggle
+                        // Toggle: alternate down
                         DispatchQueue.main.async {
-                            if self.isKeyDown { self.onKeyDown?() } 
+                            if !toggleActive {
+                                toggleActive = true
+                                self.onKeyDown?()
+                            } else {
+                                toggleActive = false
+                                self.onKeyUp?()
+                            }
                         }
                     }
                 }
             } else if event.type == .keyUp, self.isKeyDown {
-                if event.keyCode == code {
-                    if self.mode == .hold {
-                        self.isKeyDown = false
-                        DispatchQueue.main.async { self.onKeyUp?() }
-                    } else {
-                        // Toggle: second press stops
-                        self.isKeyDown = false
-                        DispatchQueue.main.async { self.onKeyUp?() }
-                    }
+                if event.keyCode == code && self.mode == .hold {
+                    self.isKeyDown = false
+                    DispatchQueue.main.async { self.onKeyUp?() }
                 }
             }
         }

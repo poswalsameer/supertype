@@ -504,7 +504,7 @@ pub extern "C" fn engine_get_history_count(ptr: *mut Engine) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn engine_get_catalog(ptr: *mut Engine) -> *mut c_char {
+pub extern "C" fn engine_get_catalog(_ptr: *mut Engine) -> *mut c_char {
     // ptr may be null — catalog does not require engine, but we accept null for Swift convenience
     let catalog = crate::models::builtin_catalog();
     match serde_json::to_string(&catalog) {

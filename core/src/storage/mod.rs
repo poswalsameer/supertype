@@ -105,7 +105,17 @@ impl Storage {
             params![text, model_id, duration_ms, bundle_id, app_name, confidence],
         )
         .map_err(|e| e.to_string())?;
-        Ok(conn.last_insert_rowid())
+        let id = conn.last_insert_rowid();
+        // Prune: keep max 5000 entries and 30 days
+        let _ = conn.execute(
+            "DELETE FROM transcription_history WHERE id IN (SELECT id FROM transcription_history ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET 5000)",
+            [],
+        );
+        let _ = conn.execute(
+            "DELETE FROM transcription_history WHERE created_at < datetime('now', '-30 days')",
+            [],
+        );
+        Ok(id)
     }
 
     pub fn history_count(&self) -> Result<i64, String> {
@@ -227,7 +237,10 @@ impl Storage {
         }
         let conn = self.conn.lock().unwrap();
         let n = conn
-            .execute("DELETE FROM dictionary_entries WHERE phrase=?1", params![phrase])
+            .execute(
+                "DELETE FROM dictionary_entries WHERE phrase=?1",
+                params![phrase],
+            )
             .map_err(|e| e.to_string())?;
         Ok(n > 0)
     }

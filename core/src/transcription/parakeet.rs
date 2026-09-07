@@ -60,13 +60,21 @@ impl ParakeetModel {
         Ok(m)
     }
 
-    pub fn load_time_ms(&self) -> Option<u64> { self.load_time_ms }
+    pub fn load_time_ms(&self) -> Option<u64> {
+        self.load_time_ms
+    }
 }
 
 impl SpeechModel for ParakeetModel {
-    fn model_id(&self) -> &str { &self.metadata.id }
-    fn metadata(&self) -> ModelMetadata { self.metadata.clone() }
-    fn is_loaded(&self) -> bool { self.data.is_some() }
+    fn model_id(&self) -> &str {
+        &self.metadata.id
+    }
+    fn metadata(&self) -> ModelMetadata {
+        self.metadata.clone()
+    }
+    fn is_loaded(&self) -> bool {
+        self.data.is_some()
+    }
     fn load(&mut self, path: &Path) -> Result<(), ModelError> {
         let new = Self::load_from_path(path)?;
         self.metadata = new.metadata;
@@ -81,10 +89,18 @@ impl SpeechModel for ParakeetModel {
         self.cancelled.store(false, Ordering::SeqCst);
     }
     fn transcribe(&self, pcm: &[f32]) -> Result<TranscriptionOutput, ModelError> {
-        if self.cancelled.load(Ordering::SeqCst) { return Err(ModelError::Cancelled); }
-        if self.data.is_none() { return Err(ModelError::NotLoaded); }
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(ModelError::Cancelled);
+        }
+        if self.data.is_none() {
+            return Err(ModelError::NotLoaded);
+        }
         if pcm.is_empty() {
-            return Ok(TranscriptionOutput { text: "".into(), is_final: true, confidence: Some(1.0) });
+            return Ok(TranscriptionOutput {
+                text: "".into(),
+                is_final: true,
+                confidence: Some(1.0),
+            });
         }
         let duration = pcm.len() as f32 / 16000.0;
         let rms: f32 = {
@@ -92,12 +108,18 @@ impl SpeechModel for ParakeetModel {
             (sum / pcm.len() as f32).sqrt()
         };
         if rms < 0.005 {
-            return Ok(TranscriptionOutput { text: "".into(), is_final: true, confidence: Some(0.99) });
+            return Ok(TranscriptionOutput {
+                text: "".into(),
+                is_final: true,
+                confidence: Some(0.99),
+            });
         }
         // Parakeet is faster (RTF 0.2) than Whisper (0.3)
         let infer_ms = ((duration * 200.0) as u64).min(60);
         std::thread::sleep(std::time::Duration::from_millis(infer_ms));
-        if self.cancelled.load(Ordering::SeqCst) { return Err(ModelError::Cancelled); }
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(ModelError::Cancelled);
+        }
         // Slightly different heuristic text to prove backend difference
         let text = if duration < 0.5 {
             "hi parakeet"
@@ -106,25 +128,39 @@ impl SpeechModel for ParakeetModel {
         } else {
             "parakeet high accuracy transcription with timestamps and apple silicon acceleration"
         };
-        Ok(TranscriptionOutput { text: text.into(), is_final: true, confidence: Some(0.97) })
+        Ok(TranscriptionOutput {
+            text: text.into(),
+            is_final: true,
+            confidence: Some(0.97),
+        })
     }
     fn transcribe_stream(&self, pcm: &[f32], chunk_ms: usize) -> Vec<TranscriptionOutput> {
-        if pcm.is_empty() { return vec![]; }
+        if pcm.is_empty() {
+            return vec![];
+        }
         let chunk_samples = 16000 * chunk_ms / 1000;
         let chunks: Vec<&[f32]> = pcm.chunks(chunk_samples).collect();
         let mut out = Vec::new();
         for (i, c) in chunks.iter().enumerate() {
-            let is_final = i == chunks.len() -1;
+            let is_final = i == chunks.len() - 1;
             if let Ok(mut r) = self.transcribe(c) {
                 r.is_final = is_final;
-                if !is_final && !r.text.is_empty() { r.text = format!("{} …", r.text); }
-                if !r.text.is_empty() { out.push(r); }
+                if !is_final && !r.text.is_empty() {
+                    r.text = format!("{} …", r.text);
+                }
+                if !r.text.is_empty() {
+                    out.push(r);
+                }
             }
         }
         out
     }
-    fn cancel(&self) { self.cancelled.store(true, Ordering::SeqCst); }
-    fn set_language(&mut self, _lang: &str) -> Result<(), ModelError> { Ok(()) }
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+    fn set_language(&mut self, _lang: &str) -> Result<(), ModelError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -135,7 +171,8 @@ mod tests {
 
     fn fake(size_mb: usize) -> NamedTempFile {
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&vec![0x42u8; size_mb * 1024 * 1024 + 1024]).unwrap();
+        f.write_all(&vec![0x42u8; size_mb * 1024 * 1024 + 1024])
+            .unwrap();
         f.flush().unwrap();
         f
     }
@@ -145,7 +182,9 @@ mod tests {
         let f = fake(2);
         let m = ParakeetModel::load_from_path(f.path()).unwrap();
         assert!(m.is_loaded());
-        let pcm: Vec<f32> = (0..16000).map(|i| (2.0* std::f32::consts::PI * 440.0 * i as f32/16000.0).sin()*0.3).collect();
+        let pcm: Vec<f32> = (0..16000)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin() * 0.3)
+            .collect();
         let out = m.transcribe(&pcm).unwrap();
         assert!(out.text.contains("parakeet"));
     }
@@ -155,6 +194,9 @@ mod tests {
         let f = fake(2);
         let m = ParakeetModel::load_from_path(f.path()).unwrap();
         m.cancel();
-        assert_eq!(m.transcribe(&vec![0.3; 16000]).unwrap_err(), ModelError::Cancelled);
+        assert_eq!(
+            m.transcribe(&vec![0.3; 16000]).unwrap_err(),
+            ModelError::Cancelled
+        );
     }
 }

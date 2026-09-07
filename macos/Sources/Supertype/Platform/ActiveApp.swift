@@ -9,12 +9,9 @@ struct ActiveApp: Codable, Equatable {
     let isTextEditable: Bool
 
     static func capture() -> ActiveApp? {
-        // Frontmost app metadata only
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let bundleId = app.bundleIdentifier
         let name = app.localizedName
-
-        // Heuristic: check focused element role via AX (best-effort, no content)
         var isEditable = false
         let pid = app.processIdentifier
         let axApp = AXUIElementCreateApplication(pid)
@@ -24,21 +21,43 @@ struct ActiveApp: Codable, Equatable {
             var role: AnyObject?
             if AXUIElementCopyAttributeValue(element as! AXUIElement, kAXRoleAttribute as CFString, &role) == .success,
                let roleStr = role as? String {
-                isEditable = ["AXTextField", "AXTextArea", "AXComboBox"].contains(roleStr)
-                // Also consider if element supports value
+                // Include WebArea for Electron/Chrome, plus standard controls
+                isEditable = ["AXTextField", "AXTextArea", "AXComboBox", "AXWebArea", "AXGroup"].contains(roleStr)
                 if !isEditable {
-                    var value: AnyObject?
-                    if AXUIElementCopyAttributeValue(element as! AXUIElement, kAXValueAttribute as CFString, &value) == .success {
-                        isEditable = true
+                    var subrole: AnyObject?
+                    if AXUIElementCopyAttributeValue(element as! AXUIElement, kAXSubroleAttribute as CFString, &subrole) == .success,
+                       let sub = subrole as? String, sub == "AXSecureTextField" {
+                        isEditable = false
+                    } else {
+                        var value: AnyObject?
+                        if AXUIElementCopyAttributeValue(element as! AXUIElement, kAXValueAttribute as CFString, &value) == .success {
+                            isEditable = true
+                        } else if AXUIElementCopyAttributeValue(element as! AXUIElement, kAXSelectedTextAttribute as CFString, &value) == .success {
+                            isEditable = true
+                        }
                     }
                 }
             }
         } else {
-            // If we cannot query AX (no permission), assume editable for permissive UX
             isEditable = true
         }
-
         return ActiveApp(bundleId: bundleId, appName: name, isTextEditable: isEditable)
+    }
+
+    /// Heuristic: is focused element a password/secure field? If so, do not inject.
+    static func isSecureFieldFocused(in app: ActiveApp) -> Bool {
+        guard let front = NSWorkspace.shared.frontmostApplication else { return false }
+        let axApp = AXUIElementCreateApplication(front.processIdentifier)
+        var focused: AnyObject?
+        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused as! AXUIElement? else { return false }
+        var subrole: AnyObject?
+        if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole) == .success,
+           let s = subrole as? String, s == "AXSecureTextField" { return true }
+        var role: AnyObject?
+        if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
+           let r = role as? String, r == "AXSecureTextField" { return true }
+        return false
     }
 }
 

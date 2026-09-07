@@ -25,6 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var textInjector = TextInjector()
     private var lastActiveApp: ActiveApp?
 
+    private var onboardingController: OnboardingWindowController?
+    private var sleepObserver: Any?
+    private var didRegisterSleepObservers = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
@@ -42,19 +46,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         setupHotkey()
         observeEngine()
         observeSettings()
+        setupSleepObservers()
 
         // Warm permissions without prompting
         _ = MicrophonePermission.shared.currentStatus()
         _ = AccessibilityPermission.shared.isTrusted()
 
         print("[Supertype] Launched. Menu bar ready. Hold \(engine.getSettings().globalShortcut) to dictate.")
+
+        // First-run onboarding: show if never launched or missing model/permissions
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.maybeShowOnboarding() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager?.unregister()
         audioCapture?.stop()
         engine.shutdown()
+        if let obs = sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(obs) }
+        if let obs2 = sleepObserver { NotificationCenter.default.removeObserver(obs2) }
         print("[Supertype] Terminated cleanly.")
+    }
+
+    // MARK: Onboarding
+
+    private func maybeShowOnboarding() {
+        let hasLaunched = UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
+        let catalog = engine.getCatalog()
+        let hasModel = catalog.contains(where: { $0.is_downloaded })
+        let micOK = MicrophonePermission.shared.currentStatus() == .authorized
+        let axOK = AccessibilityPermission.shared.isTrusted()
+        if !hasLaunched || !hasModel || !micOK || !axOK {
+            showOnboarding()
+        }
+    }
+
+    private func showOnboarding() {
+        if onboardingController == nil {
+            onboardingController = OnboardingWindowController(engine: engine)
+        }
+        onboardingController?.show()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
@@ -85,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "Onboarding…", action: #selector(showOnboardingAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Permissions…", action: #selector(openPermissions), keyEquivalent: ""))
         menu.addItem(.separator())
         let lastItem = NSMenuItem(title: "Copy Last Transcript", action: #selector(copyLast), keyEquivalent: "")
@@ -176,8 +207,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func handleHotkeyDown() {
-        // Capture active app before we steal focus (overlay is non-activating)
+        // Model-required gate: if no model downloaded, guide to onboarding/models
+        let catalog = engine.getCatalog()
+        if !catalog.contains(where: { $0.is_downloaded }) {
+            showTransientError("Download a model in Settings → Speech")
+            showOnboarding()
+            return
+        }
+        // Debounce rapid presses (<120ms)
+        if let last = lastHotkeyDown, Date().timeIntervalSince(last) < 0.12 { return }
+        lastHotkeyDown = Date()
+        // Capture active app before overlay (overlay is non-activating)
         let active = ActiveApp.capture()
+        // Secure field guard: never inject into password fields
+        if let app = active, ActiveApp.isSecureFieldFocused(in: app) {
+            showTransientError("Secure field — not injecting")
+            copyToClipboardFallback()
+            return
+        }
         lastActiveApp = active
         engine.setActiveApp(bundleId: active?.bundleId, appName: active?.appName)
         print("[Supertype] Hotkey down — active: \(active?.appName ?? "unknown") \(active?.bundleId ?? "")")
@@ -195,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         _ = engine.startRecording()
     }
+    private var lastHotkeyDown: Date?
 
     private func handleHotkeyUp() {
         if engine.state == .recording {
@@ -205,20 +253,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private func handleEngineEvent(_ ev: EngineEvent) {
         switch ev {
         case .partialTranscript(let t):
-            print("[Supertype] partial: \(t)")
+            // Redact transcript in production logs — only length
+            print("[Supertype] partial len=\(t.count)")
             overlay?.showPartial(t)
         case .finalTranscript(let t):
-            print("[Supertype] final: \(t) app=\(lastActiveApp?.bundleId ?? "")")
-            // Insertion — check target still valid
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.insertTranscript(t)
+            print("[Supertype] final len=\(t.count) app=\(lastActiveApp?.bundleId ?? "")")
+            // Insertion — no artificial delay, dispatch to background check then main inject
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                DispatchQueue.main.async { self?.insertTranscript(t) }
             }
         case .error(let msg):
             print("[Supertype] error: \(msg)")
             showTransientError(msg)
-            // Handle model unavailable, mic denied etc.
-            if msg.contains("corrupted") || msg.contains("Model") {
+            if msg.contains("corrupted") || msg.contains("Model") || msg.contains("disk full") {
                 showTransientError("Model unavailable — download in Settings")
+            }
+            if msg.lowercased().contains("disk") || msg.lowercased().contains("no space") {
+                showTransientError("Disk full — free space")
             }
         default: break
         }
@@ -226,6 +277,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func insertTranscript(_ text: String) {
         guard !text.isEmpty else { return }
+        // Secure field re-check before inject
+        if let curApp = ActiveApp.capture(), ActiveApp.isSecureFieldFocused(in: curApp) {
+            print("[Supertype] Secure field at inject — abort, copy only")
+            overlay?.showError("Secure field — Copied")
+            copyToClipboard(text)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in _ = self?.engine.acknowledge() }
+            return
+        }
         // Check if focused app still matches captured (avoid injecting into wrong app if focus changed)
         let current = ActiveApp.capture()
         if let last = lastActiveApp, let cur = current {
@@ -233,6 +292,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 print("[Supertype] Focus changed from \(last.bundleId ?? "") to \(cur.bundleId ?? "") — abort injection, keep transcript for copy")
                 overlay?.showError("Focus changed — Copied")
                 copyToClipboard(text)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in _ = self?.engine.acknowledge() }
+                return
+            }
+            // Also check if target app crashed (no frontmost)
+            if cur.bundleId == nil {
+                overlay?.showError("Target lost — Copied")
+                copyToClipboard(text)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in _ = self?.engine.acknowledge() }
                 return
             }
         }
@@ -240,7 +307,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Check AX permission
         if !AccessibilityPermission.shared.isTrusted() {
             print("[Supertype] AX not trusted — using clipboard fallback")
-            // Still try clipboard
         }
 
         let result = textInjector.insert(text)
@@ -248,14 +314,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         case .success(let method):
             print("[Supertype] Inserted via \(method)")
             overlay?.showSuccess()
-            // Acknowledge after success so state returns to idle
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in _ = self?.engine.acknowledge() }
         case .failed(let reason):
             print("[Supertype] Injection failed: \(reason) — preserve for copy")
             overlay?.showError("Insert failed")
             copyToClipboard(text)
-            // Keep transcript available via Copy Last
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in _ = self?.engine.acknowledge() }
         }
+    }
+    private func copyToClipboardFallback() {
+        if let t = engine.lastTranscript { copyToClipboard(t) }
     }
 
     private func copyToClipboard(_ text: String) {
@@ -324,6 +392,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    // MARK: Sleep/Wake
+
+    private func setupSleepObservers() {
+        guard !didRegisterSleepObservers else { return }
+        didRegisterSleepObservers = true
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(handleSleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(handleWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(handleSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(handleWake), name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc private func handleSleep() {
+        if engine.state == .recording || engine.state == .processing {
+            print("[Supertype] Sleep — cancel recording")
+            _ = engine.cancelRecording()
+            audioCapture?.stop()
+            audioCapture = nil
+        }
+    }
+
+    @objc private func handleWake() {
+        // Re-register hotkey after wake (CGEventTap may be invalidated)
+        syncHotkeyFromSettings()
+        print("[Supertype] Wake — hotkey re-registered")
+    }
+
     // MARK: Actions
 
     @objc func openSettings() {
@@ -336,6 +430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     @objc func openPermissions() { openSettings() }
+
+    @objc func showOnboardingAction() { showOnboarding() }
 
     @objc func copyLast() {
         if let t = engine.lastTranscript {

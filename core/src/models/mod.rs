@@ -280,7 +280,10 @@ impl ModelManager {
             if let Some(free_gb) = crate::hardware::HardwareInfo::probe().disk_free_gb {
                 let need_gb = ((file_size as f64 / (1024.0 * 1024.0 * 1024.0)).ceil() as u32) + 1;
                 if free_gb < need_gb {
-                    return Err(format!("not enough disk space: need {} GB, have {} GB", need_gb, free_gb));
+                    return Err(format!(
+                        "not enough disk space: need {} GB, have {} GB",
+                        need_gb, free_gb
+                    ));
                 }
             }
         }
@@ -321,9 +324,7 @@ impl ModelManager {
     /// Hardware-aware recommendation.
     pub fn recommended_for_hardware(&self, hw: &crate::hardware::HardwareInfo) -> Vec<ModelInfo> {
         let ids = crate::hardware::recommend_model_ids(hw);
-        ids.iter()
-            .filter_map(|id| self.get(id).cloned())
-            .collect()
+        ids.iter().filter_map(|id| self.get(id).cloned()).collect()
     }
 }
 
@@ -337,7 +338,9 @@ mod tests {
         // Phase 4 catalog has 4 entries (tiny-q4, tiny, base, parakeet)
         assert!(builtin_catalog().len() >= 4);
         assert!(builtin_catalog().iter().any(|m| m.id == "whisper-tiny"));
-        assert!(builtin_catalog().iter().any(|m| m.id == "parakeet-tdt-0.6b"));
+        assert!(builtin_catalog()
+            .iter()
+            .any(|m| m.id == "parakeet-tdt-0.6b"));
     }
 
     #[test]

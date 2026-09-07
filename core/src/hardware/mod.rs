@@ -34,7 +34,11 @@ impl HardwareInfo {
     }
 
     pub fn backend(&self) -> String {
-        if self.metal_supported { "metal".into() } else { "accelerate".into() }
+        if self.metal_supported {
+            "metal".into()
+        } else {
+            "accelerate".into()
+        }
     }
 }
 
@@ -44,7 +48,9 @@ fn probe_memory_gb() -> Option<u32> {
         .args(["-n", "hw.memsize"])
         .output()
         .ok()?;
-    if !output.status.success() { return None; }
+    if !output.status.success() {
+        return None;
+    }
     let s = String::from_utf8_lossy(&output.stdout);
     let bytes: u64 = s.trim().parse().ok()?;
     Some((bytes / (1024 * 1024 * 1024)) as u32)
@@ -60,13 +66,18 @@ fn probe_disk_free_gb() -> Option<u32> {
         .ok()?;
     if !output.status.success() {
         // fallback to root
-        let output2 = std::process::Command::new("df").args(["-g", "/"]).output().ok()?;
+        let output2 = std::process::Command::new("df")
+            .args(["-g", "/"])
+            .output()
+            .ok()?;
         let s = String::from_utf8_lossy(&output2.stdout);
         // df -g output: ...  ... Available
         for line in s.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 {
-                if let Ok(v) = parts[3].parse::<u32>() { return Some(v); }
+                if let Ok(v) = parts[3].parse::<u32>() {
+                    return Some(v);
+                }
             }
         }
         return None;
@@ -75,7 +86,9 @@ fn probe_disk_free_gb() -> Option<u32> {
     for line in s.lines().skip(1) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 4 {
-            if let Ok(v) = parts[3].parse::<u32>() { return Some(v); }
+            if let Ok(v) = parts[3].parse::<u32>() {
+                return Some(v);
+            }
         }
     }
     None

@@ -65,9 +65,7 @@ impl Downloader {
 
         // Resume offset
         let resume_from = if dest_temp.exists() {
-            std::fs::metadata(dest_temp)
-                .map(|m| m.len())
-                .unwrap_or(0)
+            std::fs::metadata(dest_temp).map(|m| m.len()).unwrap_or(0)
         } else {
             0
         };
@@ -78,7 +76,9 @@ impl Downloader {
             request = request.set("Range", &format!("bytes={}-", resume_from));
         }
 
-        let resp = request.call().map_err(|e| DownloadError::Http(e.to_string()))?;
+        let resp = request
+            .call()
+            .map_err(|e| DownloadError::Http(e.to_string()))?;
         if resp.status() != 200 && resp.status() != 206 {
             return Err(DownloadError::Http(format!("status {}", resp.status())));
         }
@@ -102,15 +102,10 @@ impl Downloader {
             None
         };
 
-        // If resuming, we need to hash existing prefix too (re-read)
-        if let Some(h) = hasher.as_mut() {
+        // If resuming with checksum, re-hash whole file at end; prefix not incrementally hashed
+        if let Some(_h) = hasher.as_mut() {
             if resume_from > 0 {
-                let existing = std::fs::read(dest_temp).map_err(|e| DownloadError::Io(e.to_string()))?;
-                // Only hash up to resume_from (file currently contains that)
-                // But we already appended, so we need to hash existing content before new data
-                // For simplicity, if resuming with checksum, re-hash whole file after download
-                // So we won't incremental hash prefix now; we'll verify whole file at end.
-                let _ = h;
+                let _existing_len = resume_from;
             }
         }
 
@@ -122,7 +117,9 @@ impl Downloader {
                 return Err(DownloadError::Cancelled);
             }
             use std::io::Read;
-            let n = reader.read(&mut buf).map_err(|e| DownloadError::Io(e.to_string()))?;
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| DownloadError::Io(e.to_string()))?;
             if n == 0 {
                 break;
             }
@@ -147,7 +144,8 @@ impl Downloader {
         if !expected_sha.is_empty() {
             let final_hash = if resume_from > 0 {
                 // Re-hash whole file
-                let data = std::fs::read(dest_temp).map_err(|e| DownloadError::Io(e.to_string()))?;
+                let data =
+                    std::fs::read(dest_temp).map_err(|e| DownloadError::Io(e.to_string()))?;
                 let mut hasher2 = Sha256::new();
                 hasher2.update(&data);
                 hex::encode(hasher2.finalize())
@@ -161,9 +159,7 @@ impl Downloader {
         }
 
         // Corrupted check: at least 1 MB
-        let final_size = std::fs::metadata(dest_temp)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let final_size = std::fs::metadata(dest_temp).map(|m| m.len()).unwrap_or(0);
         if final_size < 1024 * 1024 {
             let _ = std::fs::remove_file(dest_temp);
             return Err(DownloadError::Corrupted("file too small".into()));
@@ -187,9 +183,7 @@ impl Downloader {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| DownloadError::Io(e.to_string()))?;
         }
-        let total = std::fs::metadata(src)
-            .map(|m| m.len())
-            .ok();
+        let total = std::fs::metadata(src).map(|m| m.len()).ok();
         let mut reader = std::fs::File::open(src).map_err(|e| DownloadError::Io(e.to_string()))?;
         let mut file = std::fs::File::create(dest).map_err(|e| DownloadError::Io(e.to_string()))?;
         let mut hasher = if !expected_sha.is_empty() {
@@ -205,7 +199,9 @@ impl Downloader {
                 return Err(DownloadError::Cancelled);
             }
             use std::io::Read;
-            let n = reader.read(&mut buf).map_err(|e| DownloadError::Io(e.to_string()))?;
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| DownloadError::Io(e.to_string()))?;
             if n == 0 {
                 break;
             }
@@ -235,7 +231,10 @@ impl Downloader {
 
 fn try_probe_disk_free() -> Option<u32> {
     // Use df -g, same as hardware module
-    let output = std::process::Command::new("df").args(["-g", "/"]).output().ok()?;
+    let output = std::process::Command::new("df")
+        .args(["-g", "/"])
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&output.stdout);
     for line in s.lines().skip(1) {
         let parts: Vec<&str> = line.split_whitespace().collect();

@@ -1,147 +1,112 @@
 # Supertype — Privacy-First Local Voice-to-Text for macOS
 
-> Phase 3 — System-Wide Voice Typing (global hotkey → local transcribe → AX/clipboard inject)
+> Phase 5 — Production-hardened local dictation: hold one key, speak, text appears almost immediately.
 
-A local-first voice typing utility conceptually similar to Wispr Flow: hold a global shortcut, speak, release, and have text appear in the focused app — entirely on-device.
+Hold a global shortcut, speak naturally, release — text appears where you type, entirely on-device via local ASR (whisper.cpp / Parakeet), VAD, deterministic formatting, and AX/clipboard injection.
 
-**Status:** Phase 3 complete — hold-to-talk global hotkey, FocusManager, TextInjector (AX + clipboard fallback), deterministic formatter, transcript lifecycle (raw→formatted), SQLite history (app/bundle), overlay polish.
+**Status:** Phase 5 complete — onboarding wizard, 6-tab settings, polished overlay, latency/memory/battery hardening, reliability edge cases, text quality regression, app compatibility matrix, per-model benchmarks, diagnostics, security audit, release-ready (signing docs, DMG, hardened entitlements).
 
 ## Architecture at a Glance
 
 ```
 macOS Shell (SwiftUI + AppKit)
-        │
-        │  C-ABI / Swift ↔ Rust FFI
+        │  C-ABI / Swift ↔ Rust FFI (staticlib supertype_core, OpaquePointer *mut Engine)
         ▼
 Rust Core Engine
-  ├─ State Machine (Idle → Preparing → Recording → Processing → Completed/Error)
-  ├─ Settings (validated, persisted)
-  ├─ Storage (SQLite + migrations)
-  ├─ Events (recording_started … error, broadcast → SwiftUI)
-  └─ Future seams: SpeechModel trait, ModelManager, VAD, Formatting
-        │
+  ├─ State (Idle→Recording→Processing→Completed/Error, 30s cap, focus-change guard)
+  ├─ Settings (shortcut/behavior, language, punct/caps, mic, history, overlay)
+  ├─ Storage (SQLite WAL, settings/history/dictionary, 5000/30d prune, no audio)
+  ├─ Audio (AVAudioEngine 1024 tap → AVAudioConverter 48k→16k mono → ring rtrb → resample → VAD 30ms → pending_pcm 30s cap)
+  ├─ Transcription (SpeechModel trait → WhisperCppModel q4_0/q5_0, Parakeet 0.6B fp16/CC-BY-4.0, streaming partial every 1s off-lock)
+  ├─ Formatting (token-based spoken punct, sorted dictionary, dedup, i→I, triple-space collapse, with_options)
+  ├─ Models (catalog 43/75/142/600 MB, downloader ureq stream sha256 atomic, hardware probe, recommend)
+  └─ Performance (metrics: capture/VAD/ASR/RTF/eos, BenchmarkReport)
         ▼
- Local State (SQLite @ ~/Library/Application Support/Supertype/supertype.db)
+ Local State (~/Library/Application Support/Supertype/supertype.db + models/*.bin, no audio persisted)
 ```
 
-- **macOS layer** owns: menu bar, settings window, overlay (`NSPanel`), permissions, launch-at-login, lifecycle.
-- **Rust core** owns: business logic, audio/transcription abstractions, persistence, state. No business logic leaks into SwiftUI.
+- **macOS** owns: menu bar `NSStatusItem`, `NSPanel` overlay (non-activating, floating, multi-display clamped, async AX, low-CPU), onboarding, settings, permissions, `SMAppService`, `AVAudioEngine`, `CGEventTap/NSEvent`, `AXIsProcessTrusted`, `TextInjector` (AXSelectedText preferred, clipboard fallback background restore, secure-field block).
+- **Rust** owns: state, audio, transcription, storage, settings, formatting, input, models, performance, hardware. No network beyond downloader.
 
 ## Prerequisites
 
-- macOS 14+ (deployment target), Apple Silicon recommended
-- **Full Xcode** (not just CLT) for `Supertype.xcodeproj` — or use SPM via CLT:
-  ```sh
-  xcode-select --install        # CLT (swift build)
-  # For full app bundle, install Xcode from App Store + `sudo xcodebuild -license accept`
-  ```
-- Rust:
-  ```sh
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  source "$HOME/.cargo/env"
-  rustup component add clippy rustfmt
-  ```
+- macOS 14+, Apple Silicon recommended, full Xcode for app bundle or CLT for `swift build`
+- Rust `stable` + `clippy/rustfmt`: `curl ... | sh && source $HOME/.cargo/env && rustup component add clippy rustfmt`
 
 ## Build & Run
 
 ```sh
-# 1. Build Rust core (staticlib + dylib)
 cargo build --manifest-path core/Cargo.toml
-cargo test  --manifest-path core/Cargo.toml
+cargo test  --manifest-path core/Cargo.toml   # 108 tests
+swift build --package-path macos              # debug
+./macos/.build/debug/Supertype                # menu bar, LSUIElement
 
-# 2. Build Swift app (SPM, works with CLT)
-swift build --package-path macos
-
-# 3. Run (menu-bar utility, LSUIElement — no Dock icon until Phase 3 hotkey)
-./macos/.build/debug/Supertype
-
-# 4. Release
+# Release + bench
 cargo build --release --manifest-path core/Cargo.toml
+cargo run --manifest-path core/Cargo.toml --bin bench
 swift build -c release --package-path macos
+DYLD_LIBRARY_PATH=core/target/release macos/.build/release/SupertypeFFITest
+
+# One-command verifications
+./scripts/test-phase-1.sh; ./scripts/test-phase-3.sh; ./scripts/test-phase-4.sh
+cargo clippy --manifest-path core/Cargo.toml -- -D warnings
 ```
 
-> Full Xcode build: open `macos/Supertype.xcodeproj` (Phase 1 ships SPM-first; Xcode project is generated on next bootstrap with `xcodegen` if needed).
+## First-Run (no account)
+
+1. Launch → onboarding wizard explains "Your voice is processed locally on this Mac."
+2. Grant Microphone → Accessibility → choose hold/toggle shortcut.
+3. Download a model (Tiny Q4 43 MB shown, Tiny 75 MB default/recommended, Base 142 MB, Parakeet 600 MB) — size shown before download, SHA verified.
+4. Hold shortcut (default `fn`, alternatives `ctrl+space`) in any app (Safari, Chrome, Slack, Discord, VS Code, Cursor, Notion, Notes, TextEdit, Terminal — see `docs/compatibility.md`) → overlay `● Listening` (subtle waveform, non-focus-stealing, never interrupts target, clamped to visibleFrame, hides on sleep) → speak → release → `◐ Processing` → `✓ Done` → text inserted at caret (AXSelectedText preferred, clipboard fallback), audio discarded, optional history saved, app returns to idle (<0.3% CPU).
+5. Configure once, forget app exists.
+
+Settings: `General` (launch at login, shortcut, hold/toggle, overlay), `Microphone` (device UID picker, live level test), `Speech` (Models, Vocabulary, Language, punct/caps toggles), `History` (enable, clear, reveal DB), `Privacy` (local inference explainer, network allowlist, pruned SQLite), `About` (version, macOS, licenses, diagnostics copy/export).
 
 ## Repository Layout
 
 ```
-/core            Rust engine (state, settings, storage, FFI)
-  /src/engine    AppState + Engine + events (streaming partial/final)
-  /src/audio     ring (rtrb SPSC) + resample (mono 16k) + VAD (Silero-like) + pipeline
-  /src/transcription  SpeechModel trait → WhisperCppModel (load/warm/cancel) + DummyModel
-  /src/transcript lifecycle (Raw→Formatted via formatter + dictionary)
-  /src/formatting deterministic (punct, new line, caps, dict)
-  /src/models    ModelManager (discover/verify/download_url) + builtin catalog
-  /src/performance  metrics (RTF, load, VAD, backend metal) + BenchmarkReport
-  /src/input     TextInjector trait + InsertionRequest
-  /src/bin/bench  local benchmark (fixtures/*.wav, no network)
-  /include       C header for Swift (push_audio, metrics, history, format, activeApp)
-  /resources/models  on-demand Whisper quantized (download-model.sh)
-  /resources/fixtures  hello/technical/longer wav (en)
-/macos           SwiftUI + AppKit shell
-  /Sources/Supertype/App      SupertypeApp + AppDelegate (hotkey+focus+inject lifecycle)
-  /Sources/Supertype/Audio    AudioCapture (AVAudioEngine → Rust, 16k mono, Accelerate)
-  /Sources/Supertype/Bridge   RustBridge (FFI + pushAudio + history/format + activeApp)
-  /Sources/Supertype/UI       SettingsView (General/Permissions/History/Models/Privacy), OverlayWindow (partial, anchored), HistoryView
-  /Sources/Supertype/Permissions  Microphone + Accessibility (+ Input Monitoring note)
-  /Sources/Supertype/Platform     LaunchAtLogin, HotkeyManager (InputController CGEventTap/NSEvent), ActiveApp, TextInjector/ClipboardFallback
-  /Sources/CSupertypeCore     Clang module re-exporting C header
-/docs/architecture  Design rationale
-/docs/testing     Phase-wise testing playbooks (phase-1.md canonical, README routing)
-/docs/qa-checklist.md  Legacy Phase 1 checkbox (kept, see docs/testing/phase-1.md)
-/tests            Integration (see core/tests, docs/testing/)
+/core                Rust engine + FFI + bench + fixtures
+/macos               SwiftUI+AppKit shell (App/Onboarding, Audio, Bridge, Platform, UI, Permissions)
+/docs/architecture   design rationale
+/docs/testing        phase 1-4 playbooks + regression
+/docs/compatibility  matrix (Safari/Chrome/Slack/VS Code/… insertion method, limits)
+/docs/benchmarks     report.md (download/load/RAM/RTF/CPU, recommended defaults)
+/docs/privacy.md     local-only flow + privacy controls
+/docs/security.md    network/filesystem/permissions/clipboard audit
+/docs/release.md     versioning/signing/hardened runtime/DMG
+/resources/fixtures  hello/technical/longer wav + regression.json
+/scripts             bootstrap, download-model.sh, test-phase-*.sh, make-dmg.sh
 ```
 
-## Privacy Guarantees (enforced in code)
+## Privacy Guarantees
 
-- `core/src/audio/mod.rs` — audio never written to disk; no `BLOB` audio tables (migrations test asserts).
-- No `URLSession`, no telemetry, no cloud API. Offline after install.
-- `Storage` only holds `settings`, `transcription_history` (text), `dictionary_entries`.
-- Logs never include transcript content (engine logs only state codes).
+- `AUDIO_NEVER_PERSISTED` — ring + pending_pcm cleared on stop/cancel/ack/sleep; no audio SQLite table (migration test asserts).
+- No `URLSession` except `ModelCatalogView/Onboarding` download on tap (HTTPS + SHA atomic). No telemetry. Logs redacted (len only).
+- History opt-in, 5000/30d pruned, `~/Library/Application Support/Supertype/supertype.db` WAL.
 
-## Settings Persisted (SQLite + UserDefaults mirror)
-
-- `selected_microphone_id` (optional device UID)
-- `global_shortcut` (string, Phase 3 will parse)
-- `selected_model_id` (e.g. `whisper-tiny`)
-- `history_enabled`, `launch_at_login`, `overlay_enabled`
-
-## State Machine
-
-`Idle → Preparing → Recording → Processing → Completed → Idle` (+ `Error` recovery). Invalid transitions return error code (10) — see `core/src/engine/state.rs`.
-
-Events exposed for Phase 2: `recording_started`, `recording_stopped`, `speech_detected`, `speech_ended`, `partial_transcript`, `final_transcript`, `processing_started`, `processing_completed`, `error`, `state_changed`.
-
-## Testing
+## On-Demand Models
 
 ```sh
-./scripts/test-phase-3.sh           # one-command Phase 3 verification (85 tests + bench + FFI + swift)
-./scripts/test-phase-2.sh           # Phase 2 still green
-./scripts/test-phase-1.sh           # Phase 1 still green
-cargo test --manifest-path core/Cargo.toml -- --nocapture
-cargo run --manifest-path core/Cargo.toml --bin bench  # 3 fixtures, RTF <1, backend metal
-cat docs/testing/phase-3.md         # Phase 3 playbook (hotkey→inject)
-cat docs/testing/phase-2.md
-cat docs/testing/phase-1.md
+./scripts/download-model.sh whisper-tiny       # 43-75 MB
+./scripts/download-model.sh whisper-base       # 142 MB
+./scripts/download-model.sh parakeet-tdt-0.6b  # 600 MB fp16
 ```
 
-Full phase routing: [`docs/testing/README.md`](docs/testing/README.md).
+Catalog shows size, quant, runtime, license (MIT/CC-BY-4.0), attribution, capabilities, recommended badge per hardware (8 GB→Tiny, 16 GB+→Parakeet).
 
-## On-demand model (Phase 2, no model bundled)
+## Testing & Benchmarks
 
 ```sh
-./scripts/download-model.sh whisper-tiny   # 75 MB → ~/Library/Application Support/Supertype/models/
-./scripts/download-model.sh whisper-base   # 142 MB
-# bench works without download (temp fake model) but real transcription needs the file
+cargo test --manifest-path core/Cargo.toml -- --nocapture   # 108 including formatting regression
+cargo run --manifest-path core/Cargo.toml --bin bench -- ~/Library/Application\ Support/Supertype/models/whisper-tiny-q4_0.bin
+cat docs/benchmarks/report.md          # RTF 0.02-0.11 metal, peak 40-650 MB
+cat docs/testing/phase-4.md; cat docs/compat*md
 ```
 
-Hold-to-talk: default `fn`, alternatives `ctrl+space` etc. — configurable in Settings → General. Works unfocused via `GlobalInputController` (CGEventTap/NSEvent). Dictation inserts via AX and clipboard fallback; history stored only when enabled.
+Regression corpus: `resources/fixtures/regression.json` covers conversational/technical/programming/proper/mixed/short/long/dedup.
 
-## Next Phases
+## Distribution
 
-- **Phase 2:** ✅ done — AVAudioEngine capture, ring → resample, VAD, whisper.cpp (quantized, on-demand), streaming, metrics/bench
-- **Phase 3:** ✅ done — global hotkey (hold/toggle), AX/clipboard TextInjector, ActiveApp, deterministic formatter, transcript lifecycle, SQLite history (bundle), overlay polish
-- **Phase 4:** Model catalog, downloads, Parakeet integration
-- **Phase 5:** Polish, latency/memory profiling, notarization
+`Info.plist` `CFBundleShortVersionString 0.2.0 (42)`, `LSUIElement true`, `LSMinimumSystemVersion 14.0`. `Supertype.entitlements` hardened (`allow-jit`, `allow-unsigned-executable-memory`, `disable-library-validation` for Metal/ONNX), `audio-input`, `automation.apple-events`. `scripts/make-dmg.sh` builds DMG; signing/notarization steps documented in `docs/release.md` (requires credentials — project is release-ready, not falsely claiming notarized).
 
-See `docs/architecture/README.md` for the seven design rationales Phase 2 needs.
+See `docs/architecture/README.md` for 7 rationales, `docs/release.md` for signing, `docs/security.md` for audit.

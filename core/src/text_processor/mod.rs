@@ -19,7 +19,9 @@ pub struct ProcessorContext {
 pub struct DeterministicProcessor;
 
 impl TextProcessor for DeterministicProcessor {
-    fn name(&self) -> &str { "deterministic" }
+    fn name(&self) -> &str {
+        "deterministic"
+    }
     fn process(&self, text: &str, _ctx: &ProcessorContext) -> String {
         let formatted = crate::formatting::format_transcript(text);
         crate::formatting::apply_dictionary(&formatted, &_ctx.dictionary)
@@ -33,12 +35,21 @@ pub struct LocalLLMProcessor {
 }
 
 impl LocalLLMProcessor {
-    pub fn new(model_path: Option<std::path::PathBuf>) -> Self { Self { model_path } }
-    pub fn is_available(&self) -> bool { self.model_path.as_ref().map(|p| p.exists()).unwrap_or(false) }
+    pub fn new(model_path: Option<std::path::PathBuf>) -> Self {
+        Self { model_path }
+    }
+    pub fn is_available(&self) -> bool {
+        self.model_path
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+    }
 }
 
 impl TextProcessor for LocalLLMProcessor {
-    fn name(&self) -> &str { "local_llm" }
+    fn name(&self) -> &str {
+        "local_llm"
+    }
     fn process(&self, text: &str, ctx: &ProcessorContext) -> String {
         // If LLM not available, fallback to deterministic
         if !self.is_available() {
@@ -58,14 +69,22 @@ mod tests {
     #[test]
     fn deterministic_processes() {
         let p = DeterministicProcessor;
-        let ctx = ProcessorContext { app_name: None, bundle_id: None, dictionary: HashMap::new() };
+        let ctx = ProcessorContext {
+            app_name: None,
+            bundle_id: None,
+            dictionary: HashMap::new(),
+        };
         assert_eq!(p.process("hello comma world", &ctx), "Hello, world");
     }
 
     #[test]
     fn llm_fallback_when_no_model() {
         let p = LocalLLMProcessor::new(None);
-        let ctx = ProcessorContext { app_name: None, bundle_id: None, dictionary: HashMap::new() };
+        let ctx = ProcessorContext {
+            app_name: None,
+            bundle_id: None,
+            dictionary: HashMap::new(),
+        };
         assert!(!p.is_available());
         assert_eq!(p.process("hello", &ctx), "Hello");
     }

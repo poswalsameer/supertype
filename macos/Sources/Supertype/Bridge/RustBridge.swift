@@ -36,6 +36,10 @@ public struct AppSettings: Codable, Equatable {
     public var historyEnabled: Bool
     public var launchAtLogin: Bool
     public var overlayEnabled: Bool
+    public var shortcutBehavior: String
+    public var language: String
+    public var punctuationEnabled: Bool
+    public var capitalizationEnabled: Bool
 
     public static var `default`: AppSettings {
         AppSettings(
@@ -44,7 +48,11 @@ public struct AppSettings: Codable, Equatable {
             selectedModelId: "whisper-tiny",
             historyEnabled: true,
             launchAtLogin: false,
-            overlayEnabled: true
+            overlayEnabled: true,
+            shortcutBehavior: "hold",
+            language: "en",
+            punctuationEnabled: true,
+            capitalizationEnabled: true
         )
     }
 
@@ -55,6 +63,23 @@ public struct AppSettings: Codable, Equatable {
         case historyEnabled = "history_enabled"
         case launchAtLogin = "launch_at_login"
         case overlayEnabled = "overlay_enabled"
+        case shortcutBehavior = "shortcut_behavior"
+        case language = "language"
+        case punctuationEnabled = "punctuation_enabled"
+        case capitalizationEnabled = "capitalization_enabled"
+    }
+
+    public init(selectedMicrophoneId: String? = nil, globalShortcut: String = "fn", selectedModelId: String = "whisper-tiny", historyEnabled: Bool = true, launchAtLogin: Bool = false, overlayEnabled: Bool = true, shortcutBehavior: String = "hold", language: String = "en", punctuationEnabled: Bool = true, capitalizationEnabled: Bool = true) {
+        self.selectedMicrophoneId = selectedMicrophoneId
+        self.globalShortcut = globalShortcut
+        self.selectedModelId = selectedModelId
+        self.historyEnabled = historyEnabled
+        self.launchAtLogin = launchAtLogin
+        self.overlayEnabled = overlayEnabled
+        self.shortcutBehavior = shortcutBehavior
+        self.language = language
+        self.punctuationEnabled = punctuationEnabled
+        self.capitalizationEnabled = capitalizationEnabled
     }
 }
 
@@ -574,11 +599,35 @@ public final class RustEngine: ObservableObject {
 
     private func startPolling() {
         pollTimer?.cancel()
-        // Poll Rust events every 50ms while not idle (replaces broadcast)
-        pollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect().sink { [weak self] _ in
-            self?.pollRustEvents()
-            if self?.state == .idle || self?.state == .completed { self?.pollTimer?.cancel() }
+        // Poll on background queue every 10ms while recording/processing to reduce latency, no main wake when idle
+        let queue = DispatchQueue.global(qos: .userInitiated)
+        var timer: AnyCancellable?
+        timer = Timer.publish(every: 0.02, on: .main, in: .common).autoconnect().sink { [weak self] _ in
+            guard let self else { return }
+            // Do actual poll off main
+            queue.async { self.pollRustEventsBackground() }
+            if self.state == .idle {
+                timer?.cancel()
+                self.pollTimer?.cancel()
+            }
         }
+        pollTimer = timer
+    }
+
+    private func pollRustEventsBackground() {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return }
+        var out: UnsafeMutablePointer<CChar>? = nil
+        let rc = engine_poll_event(h, &out)
+        if rc == 1, let ptr = out, let json = String(validatingUTF8: ptr) {
+            engine_string_free(ptr)
+            if let ev = EngineEvent.from(json: json) {
+                DispatchQueue.main.async { self.handleEvent(ev) }
+            }
+        } else if rc == 1, let ptr = out {
+            engine_string_free(ptr)
+        }
+        #endif
     }
 
     private func pollRustEvents() {

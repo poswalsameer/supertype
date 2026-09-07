@@ -33,7 +33,7 @@ impl AudioPipeline {
     }
 
     pub fn with_default() -> Self {
-        Self::new(48000, 1)
+        Self::new(16000, 1)
     }
 
     pub fn update_input_format(&mut self, rate: u32, channels: usize) {

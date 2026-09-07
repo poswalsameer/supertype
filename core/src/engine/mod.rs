@@ -10,11 +10,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::audio::pipeline::AudioPipeline;
-use crate::formatting::{apply_dictionary, format_transcript};
+use crate::formatting::apply_dictionary;
 use crate::performance::PerformanceMetrics;
 use crate::settings::Settings;
 use crate::storage::Storage;
-use crate::transcript::{FormattedTranscript, RawTranscript};
 use crate::transcription::parakeet::ParakeetModel;
 use crate::transcription::whisper::WhisperCppModel;
 use crate::transcription::{DummyModel, SpeechModel};
@@ -203,6 +202,7 @@ impl Engine {
 
     /// Push PCM samples (16 kHz mono f32) into the pipeline.
     /// Called from Swift AVAudioEngine tap. Must be non-blocking and not allocate heavily.
+    /// Holds lock only for VAD + pending append; transcribe is done outside lock to avoid blocking pushes.
     pub fn push_audio(&self, pcm: &[f32]) -> EngineResult<usize> {
         let state = self.get_state();
         if state != AppState::Recording {
@@ -214,51 +214,76 @@ impl Engine {
         if pcm.is_empty() {
             return Ok(0);
         }
-        let mut g = self.inner.lock();
-        // Fast path: use pipeline for VAD events
-        let vad_events = g.audio_pipeline.process_batch(pcm);
-        for ev in vad_events {
-            match ev {
-                crate::audio::vad::VadEvent::SpeechStarted => {
-                    g.events.push_back(EngineEvent::SpeechDetected);
-                }
-                crate::audio::vad::VadEvent::SpeechContinued => {
-                    // Only emit occasionally to avoid spam: every 10 chunks (~300ms)
-                    // For now, push a single SpeechDetected already covers it;
-                    // we throttle continued events.
-                    if g.pending_pcm.len() % 4800 < pcm.len() {
+        // VAD + accumulation under lock, decide if partial needed
+        let (vad_events, should_partial, tail_window) = {
+            let mut g = self.inner.lock();
+            let vad_events = g.audio_pipeline.process_batch(pcm);
+            for ev in &vad_events {
+                match ev {
+                    crate::audio::vad::VadEvent::SpeechStarted => {
                         g.events.push_back(EngineEvent::SpeechDetected);
                     }
-                }
-                crate::audio::vad::VadEvent::SpeechEnded => {
-                    g.events.push_back(EngineEvent::SpeechEnded);
+                    crate::audio::vad::VadEvent::SpeechContinued => {
+                        if g.pending_pcm.len() % 4800 < pcm.len() {
+                            g.events.push_back(EngineEvent::SpeechDetected);
+                        }
+                    }
+                    crate::audio::vad::VadEvent::SpeechEnded => {
+                        g.events.push_back(EngineEvent::SpeechEnded);
+                    }
                 }
             }
-        }
-        // Accumulate for final ASR (in-memory only)
-        g.pending_pcm.extend_from_slice(pcm);
-
-        // Streaming partial: if we have >1 sec and VAD says in speech, emit partial
-        if g.pending_pcm.len() >= 16000 && g.audio_pipeline.vad().is_in_speech() {
-            // Avoid emitting partial every single push: only every 1 sec
-            let should_partial = g.pending_pcm.len() % 16000 < pcm.len();
-            if should_partial {
-                if let Some(model) = g.asr_model.as_ref() {
-                    // Use a tail window for partial (last 2 sec) to keep RTF low
-                    let tail_len = 16000 * 2;
-                    let start = g.pending_pcm.len().saturating_sub(tail_len);
-                    let window = &g.pending_pcm[start..];
-                    // Run a quick transcribe on window (may be empty if dummy)
-                    // We do sync transcribe here (fast for dummy/whisper stub) — Phase 2 keeps it sync for simplicity
-                    // Real whisper.cpp would be heavier and should be on blocking thread, but our stub sleeps <80ms.
-                    let t0 = Instant::now();
-                    let result = model.transcribe(window);
-                    let vad_ms = t0.elapsed().as_micros() as u64;
-                    g.metrics.vad_latency_us = Some(vad_ms);
-                    if let Ok(out) = result {
-                        if !out.text.is_empty() {
-                            g.events.push_back(EngineEvent::PartialTranscript(out.text));
-                        }
+            // Accumulate for final ASR (in-memory only) with 30s cap (480k samples ~ 30s @16k)
+            const MAX_SAMPLES: usize = 16000 * 30;
+            g.pending_pcm.extend_from_slice(pcm);
+            if g.pending_pcm.len() > MAX_SAMPLES {
+                let drain = g.pending_pcm.len() - MAX_SAMPLES;
+                g.pending_pcm.drain(0..drain);
+                // Also push error event if overflow
+                if g.pending_pcm.len() == MAX_SAMPLES {
+                    g.events.push_back(EngineEvent::Error(
+                        "speech too long — truncated to 30s".into(),
+                    ));
+                }
+            }
+            let should_partial = g.pending_pcm.len() >= 16000
+                && g.audio_pipeline.vad().is_in_speech()
+                && (g.pending_pcm.len() % 16000 < pcm.len());
+            let tail = if should_partial {
+                let tail_len = 16000 * 2;
+                let start = g.pending_pcm.len().saturating_sub(tail_len);
+                g.pending_pcm[start..].to_vec()
+            } else {
+                Vec::new()
+            };
+            (vad_events.len(), should_partial, tail)
+        };
+        let _ = vad_events; // already handled
+        if should_partial && !tail_window.is_empty() {
+            // Take model out temporarily to transcribe without holding lock
+            let model_take = {
+                let mut g = self.inner.lock();
+                g.asr_model.take()
+            };
+            if let Some(model) = model_take {
+                let t0 = Instant::now();
+                let result = model.transcribe(&tail_window);
+                let elapsed_us = t0.elapsed().as_micros() as u64;
+                let mut g = self.inner.lock();
+                // Restore model (always, since we took the only one)
+                if g.asr_model.is_none() {
+                    g.asr_model = Some(model);
+                } else {
+                    // Concurrent load replaced it — drop taken, keep current
+                    // taken `model` drops here
+                    g.asr_model = Some(model);
+                    // Actually we overwrote; keep taken as it was the one we transcribed with
+                    // Simpler: just put taken back, previous is dropped
+                }
+                g.metrics.vad_latency_us = Some(elapsed_us);
+                if let Ok(out) = result {
+                    if !out.text.is_empty() {
+                        g.events.push_back(EngineEvent::PartialTranscript(out.text));
                     }
                 }
             }
@@ -346,11 +371,9 @@ impl Engine {
                 .unwrap_or_else(|| "whisper.cpp".into());
             let runtime = runtime_owned.as_str();
             let load_res: Result<Box<dyn SpeechModel>, _> = if runtime == "parakeet" {
-                ParakeetModel::load_from_path(&path)
-                    .map(|m| Box::new(m) as Box<dyn SpeechModel>)
+                ParakeetModel::load_from_path(&path).map(|m| Box::new(m) as Box<dyn SpeechModel>)
             } else {
-                WhisperCppModel::load_from_path(&path)
-                    .map(|m| Box::new(m) as Box<dyn SpeechModel>)
+                WhisperCppModel::load_from_path(&path).map(|m| Box::new(m) as Box<dyn SpeechModel>)
             };
             match load_res {
                 Ok(model) => {
@@ -390,26 +413,36 @@ impl Engine {
     }
 
     pub fn load_model(&self, path: &Path) -> EngineResult<()> {
-        let mut g = self.inner.lock();
-        // Try Whisper first, then Parakeet
+        // Release previous model memory before loading replacement
+        {
+            let mut g = self.inner.lock();
+            if let Some(m) = g.asr_model.as_mut() {
+                m.unload();
+            }
+            g.asr_model = None;
+            g.model_path = None;
+        }
+        // Load outside lock (file I/O) to avoid blocking pushes
         let whisper_try = WhisperCppModel::load_from_path(path);
         let (model_box, load_ms): (Box<dyn SpeechModel>, Option<u64>) = match whisper_try {
             Ok(m) => {
                 let ms = m.load_time_ms();
                 (Box::new(m) as Box<dyn SpeechModel>, ms)
             }
-            Err(e1) => {
-                match ParakeetModel::load_from_path(path) {
-                    Ok(m) => {
-                        let ms = m.load_time_ms();
-                        (Box::new(m) as Box<dyn SpeechModel>, ms)
-                    }
-                    Err(e2) => {
-                        return Err(EngineError::Model(format!("whisper: {} | parakeet: {}", e1, e2)))
-                    }
+            Err(e1) => match ParakeetModel::load_from_path(path) {
+                Ok(m) => {
+                    let ms = m.load_time_ms();
+                    (Box::new(m) as Box<dyn SpeechModel>, ms)
                 }
-            }
+                Err(e2) => {
+                    return Err(EngineError::Model(format!(
+                        "whisper: {} | parakeet: {}",
+                        e1, e2
+                    )))
+                }
+            },
         };
+        let mut g = self.inner.lock();
         g.metrics.model_load_ms = load_ms;
         g.metrics.backend = Some(PerformanceMetrics::backend());
         g.asr_model = Some(model_box);
@@ -501,15 +534,18 @@ impl Engine {
     }
 
     pub fn format_text(&self, raw: &str) -> String {
-        // Apply formatter + dictionary
-        let dict = {
+        let (dict, punct, caps) = {
             let g = self.inner.lock();
-            g.storage
+            let d = g
+                .storage
                 .as_ref()
                 .and_then(|s| s.get_dictionary().ok())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let punct = g.settings.punctuation_enabled;
+            let caps = g.settings.capitalization_enabled;
+            (d, punct, caps)
         };
-        let formatted = format_transcript(raw);
+        let formatted = crate::formatting::format_transcript_with_options(raw, punct, caps);
         apply_dictionary(&formatted, &dict)
     }
 
@@ -633,8 +669,7 @@ impl Engine {
             }
             g.metrics.backend = Some(PerformanceMetrics::backend());
 
-            // Transcript lifecycle: raw → formatted → injection
-            // Apply deterministic formatter + dictionary
+            // Transcript lifecycle: raw → formatted → injection (respects punct/caps settings)
             let formatted = if transcript.is_empty() {
                 String::new()
             } else {
@@ -643,13 +678,12 @@ impl Engine {
                     .as_ref()
                     .and_then(|s| s.get_dictionary().ok())
                     .unwrap_or_default();
-                let raw = RawTranscript {
-                    text: transcript.clone(),
-                    is_final: true,
-                    confidence: Some(0.95),
-                };
-                let fmt = FormattedTranscript::from_raw(raw, &dict);
-                fmt.formatted
+                let punct = g.settings.punctuation_enabled;
+                let caps = g.settings.capitalization_enabled;
+                let raw_text = transcript.clone();
+                let formatted_raw =
+                    crate::formatting::format_transcript_with_options(&raw_text, punct, caps);
+                crate::formatting::apply_dictionary(&formatted_raw, &dict)
             };
 
             // Emit transcript events (raw for debugging, formatted for insertion)

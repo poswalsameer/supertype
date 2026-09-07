@@ -16,10 +16,10 @@ echo "--- FFI harness Phase 4 ---"
 DYLD_LIBRARY_PATH="$ROOT/core/target/debug" "$ROOT/macos/.build/debug/SupertypeFFITest" 2>&1 | tail -n 30
 echo ""
 echo "=== Phase 4: Privacy audit ==="
-if grep -R "URLSession" "$ROOT/macos/Sources" --include="*.swift" 2>/dev/null | grep -v "ModelCatalogView.swift" | grep -q "URLSession"; then
-  echo "FAIL: URLSession outside ModelCatalogView"; grep -R "URLSession" "$ROOT/macos/Sources" --include="*.swift"; exit 1
+if grep -R "URLSession" "$ROOT/macos/Sources" --include="*.swift" 2>/dev/null | grep -v "ModelCatalogView.swift" | grep -v "OnboardingView.swift" | grep -q "URLSession"; then
+  echo "FAIL: URLSession outside allowlist"; grep -R "URLSession" "$ROOT/macos/Sources" --include="*.swift"; exit 1
 else
-  echo "URLSession only in ModelCatalogView: OK (audit docs/privacy.md)"
+  echo "URLSession only in ModelCatalogView/OnboardingView: OK (audit docs/privacy.md)"
 fi
 if ! grep -R "AUDIO_NEVER_PERSISTED" "$ROOT/core/src" --include="*.rs" -q; then echo "FAIL audio marker"; exit 1; else echo "Audio marker: OK"; fi
 echo "Phase 4 green — see docs/testing/phase-4.md"

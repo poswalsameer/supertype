@@ -49,6 +49,13 @@ final class OverlayWindowController {
         p.orderOut(nil)
         self.panel = p
         self.hosting = hv
+        // Hide on screen lock/sleep to avoid stale overlay
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            if self?.engine?.state == .idle { self?.panel?.orderOut(nil) }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.panel?.orderOut(nil)
+        }
     }
 
     func reflect(state: AppState) {
@@ -111,6 +118,11 @@ final class OverlayWindowController {
 
     func showError(_ msg: String) {
         guard let panel else { return }
+        // Respect overlayEnabled for errors too (consistency)
+        if engine?.getSettings().overlayEnabled == false {
+            // Still log but not show
+            return
+        }
         let truncated = msg.count > 32 ? String(msg.prefix(32)) : msg
         updateView(text: truncated, color: .systemRed)
         show()
@@ -130,18 +142,27 @@ final class OverlayWindowController {
 
     private func show() {
         guard let panel else { return }
-        if !panel.isVisible {
-            // Try to position near cursor if possible, else center
-            if let cursorPos = focusedCursorPosition() {
-                let origin = NSPoint(x: cursorPos.x - 140, y: cursorPos.y + 20)
-                panel.setFrameOrigin(origin)
-            } else {
-                panel.center()
+        if panel.isVisible { return }
+        // Position async to avoid blocking main with AX IPC (20-50ms)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let pos = self?.focusedCursorPosition()
+            DispatchQueue.main.async {
+                guard let self, let panel = self.panel, !panel.isVisible else { return }
+                if let cursorPos = pos {
+                    var origin = NSPoint(x: cursorPos.x - 140, y: cursorPos.y + 20)
+                    // Clamp to visibleFrame of screen containing point (multi-display)
+                    if let screen = NSScreen.screens.first(where: { NSMouseInRect(cursorPos, $0.frame, false) }) ?? NSScreen.main {
+                        let frame = screen.visibleFrame
+                        origin.x = max(frame.minX + 8, min(origin.x, frame.maxX - (panel.frame.width + 8)))
+                        origin.y = max(frame.minY + 8, min(origin.y, frame.maxY - (panel.frame.height + 8)))
+                    }
+                    panel.setFrameOrigin(origin)
+                } else {
+                    panel.center()
+                }
+                // Non-activating show without orderOut flash
+                panel.orderFrontRegardless()
             }
-            panel.orderFrontRegardless()
-            // Ensure we never become key window
-            panel.orderOut(nil)
-            panel.orderFrontRegardless()
         }
     }
 
@@ -160,7 +181,6 @@ final class OverlayWindowController {
             var s = CGSize.zero
             AXValueGetValue(posVal as! AXValue, .cgPoint, &position)
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &s)
-            // Convert Cocoa: position is bottom-left
             return CGPoint(x: position.x + s.width/2, y: position.y - 20)
         }
         return nil
