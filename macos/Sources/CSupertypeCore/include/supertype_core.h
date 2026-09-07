@@ -27,6 +27,20 @@ void engine_string_free(char* s);
 // Events
 int32_t engine_poll_event(Engine* ptr, char** out_json);
 
+// Audio ingestion (Phase 2)
+// Push 16k mono f32 PCM. Must be in Recording state. Returns 0 on success.
+int32_t engine_push_audio(Engine* ptr, const float* data, uintptr_t len);
+// Push with format conversion (native rate/channels)
+int32_t engine_push_audio_with_format(Engine* ptr, const float* data, uintptr_t len, uint32_t sample_rate, uint32_t channels);
+
+// Metrics / model
+char* engine_get_metrics(Engine* ptr);
+char* engine_get_last_transcript(Engine* ptr);
+char* engine_get_model_info(Engine* ptr);
+int32_t engine_load_model(Engine* ptr, const char* path);
+int32_t engine_unload_model(Engine* ptr);
+int32_t engine_cancel_transcription(Engine* ptr);
+
 // Version
 const char* engine_version(void);
 

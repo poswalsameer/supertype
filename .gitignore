@@ -23,6 +23,12 @@ DerivedData/
 *.db
 *.db-journal
 
+# Models (on-demand, not in repo)
+resources/models/*.bin
+resources/models/*.ggml
+/models/*.bin
+Library/Application\ Support/Supertype/models/
+
 # Secrets
 .env
 Secrets.plist

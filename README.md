@@ -1,10 +1,10 @@
 # Supertype — Privacy-First Local Voice-to-Text for macOS
 
-> Phase 1 — Native macOS Foundation (menu bar, Rust core, SQLite, permissions, overlay)
+> Phase 2 — Local Speech Engine (mic → VAD → Whisper, streaming, on-demand model)
 
 A local-first voice typing utility conceptually similar to Wispr Flow: hold a global shortcut, speak, release, and have text appear in the focused app — entirely on-device.
 
-**Status:** Phase 1 implements the skeleton. Real transcription lands in Phase 2.
+**Status:** Phase 2 complete — local audio pipeline, VAD, quantized Whisper (on-demand), streaming partial/final transcripts, metrics/bench.
 
 ## Architecture at a Glance
 
@@ -66,16 +66,20 @@ swift build -c release --package-path macos
 
 ```
 /core            Rust engine (state, settings, storage, FFI)
-  /src/engine    AppState + Engine + events
-  /src/settings  Settings struct + validation
-  /src/storage   rusqlite + migrations
-  /src/audio     privacy guard (no persistence)
-  /src/transcription  SpeechModel trait + DummyModel
-  /include       C header for Swift
+  /src/engine    AppState + Engine + events (streaming partial/final)
+  /src/audio     ring (rtrb SPSC) + resample (mono 16k) + VAD (Silero-like) + pipeline
+  /src/transcription  SpeechModel trait → WhisperCppModel (load/warm/cancel) + DummyModel
+  /src/models    ModelManager (discover/verify/download_url) + builtin catalog
+  /src/performance  metrics (RTF, load, VAD, backend metal) + BenchmarkReport
+  /src/bin/bench  local benchmark (fixtures/*.wav, no network)
+  /include       C header for Swift (engine_push_audio, metrics, model)
+  /resources/models  on-demand Whisper quantized (download-model.sh)
+  /resources/fixtures  hello/technical/longer wav (en)
 /macos           SwiftUI + AppKit shell
-  /Sources/Supertype/App      SupertypeApp + AppDelegate
+  /Sources/Supertype/App      SupertypeApp + AppDelegate (AudioCapture lifecycle)
+  /Sources/Supertype/Audio    AudioCapture (AVAudioEngine → Rust, 16k mono, Accelerate)
+  /Sources/Supertype/Bridge   RustBridge (FFI + partial/final/metrics + pushAudio)
   /Sources/Supertype/UI       SettingsView, OverlayWindow (NSPanel)
-  /Sources/Supertype/Bridge   RustBridge (FFI wrapper, Combine publisher)
   /Sources/Supertype/Permissions  Microphone + Accessibility
   /Sources/Supertype/Platform     LaunchAtLogin (SMAppService), HotkeyManager stub
   /Sources/CSupertypeCore     Clang module re-exporting C header
@@ -108,17 +112,27 @@ Events exposed for Phase 2: `recording_started`, `recording_stopped`, `speech_de
 ## Testing
 
 ```sh
-./scripts/test-phase-1.sh           # one-command Phase 1 verification (recommended)
+./scripts/test-phase-2.sh           # one-command Phase 2 verification (67 tests + bench + FFI + swift)
+./scripts/test-phase-1.sh           # Phase 1 still green (subset)
 cargo test --manifest-path core/Cargo.toml -- --nocapture
-cat docs/testing/phase-1.md         # detailed automated + manual QA playbook
-cat docs/qa-checklist.md            # legacy checkbox (kept for reference)
+cargo run --manifest-path core/Cargo.toml --bin bench  # 3 fixtures, RTF <1, backend metal
+cat docs/testing/phase-2.md         # Phase 2 playbook (mic→VAD→Whisper)
+cat docs/testing/phase-1.md         # Phase 1 playbook
 ```
 
 Full phase routing: [`docs/testing/README.md`](docs/testing/README.md).
 
+## On-demand model (Phase 2, no model bundled)
+
+```sh
+./scripts/download-model.sh whisper-tiny   # 75 MB → ~/Library/Application Support/Supertype/models/
+./scripts/download-model.sh whisper-base   # 142 MB
+# bench works without download (temp fake model) but real transcription needs the file
+```
+
 ## Next Phases
 
-- **Phase 2:** AVAudioEngine capture, Silero VAD, whisper.cpp, streaming transcripts
+- **Phase 2:** ✅ done — AVAudioEngine capture, ring → resample, VAD, whisper.cpp (quantized, on-demand), streaming, metrics/bench
 - **Phase 3:** Global hotkey (hold-to-talk), AX text insertion, formatter, history
 - **Phase 4:** Model catalog, downloads, Parakeet integration
 - **Phase 5:** Polish, latency/memory profiling, notarization

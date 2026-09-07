@@ -7,7 +7,7 @@ Each phase has its own playbook. **Only the playbook for the current phase is re
 | Phase | Playbook | Focus |
 |-------|----------|-------|
 | **Phase 1** | [`phase-1.md`](./phase-1.md) | Rust core state machine, SQLite migrations, Swift ↔ Rust FFI, menu-bar shell, permissions, overlay |
-| Phase 2 | `phase-2.md` *(not yet)* | Audio capture, resampling, Silero VAD, whisper.cpp, streaming transcripts |
+| **Phase 2** | [`phase-2.md`](./phase-2.md) | Mic → ring → resample → Silero-like VAD → Whisper (local, quantized, on-demand), streaming partial/final, metrics/bench |
 | Phase 3 | `phase-3.md` *(not yet)* | Global hotkey (hold-to-talk), AX insertion, formatter, history |
 | Phase 4 | `phase-4.md` *(not yet)* | Model catalog, downloads, Parakeet integration |
 | Phase 5 | `phase-5.md` *(not yet)* | Latency/memory/battery profiling, notarization |

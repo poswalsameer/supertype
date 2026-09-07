@@ -5,12 +5,16 @@
 //! No async runtime is required for Phase 1; Phase 2 adds a Tokio runtime.
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::manual_div_ceil)]
+#![allow(clippy::needless_return)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 pub mod audio;
 pub mod engine;
 pub mod formatting;
 pub mod input;
 pub mod models;
+pub mod performance;
 pub mod settings;
 pub mod storage;
 pub mod transcription;
@@ -238,6 +242,138 @@ pub extern "C" fn engine_version() -> *const c_char {
     cstr.as_ptr()
 }
 
+/// Push 16k mono f32 PCM into the engine (must be Recording state).
+/// `data` points to `len` f32 samples. Returns 0 on success.
+#[no_mangle]
+pub extern "C" fn engine_push_audio(ptr: *mut Engine, data: *const f32, len: usize) -> c_int {
+    if ptr.is_null() || (data.is_null() && len > 0) {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    let slice = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }
+    };
+    match engine.push_audio(slice) {
+        Ok(_) => 0,
+        Err(e) => map_error_code(&e),
+    }
+}
+
+/// Push native-rate PCM with resampling (e.g. 48k stereo).
+#[no_mangle]
+pub extern "C" fn engine_push_audio_with_format(
+    ptr: *mut Engine,
+    data: *const f32,
+    len: usize,
+    sample_rate: u32,
+    channels: u32,
+) -> c_int {
+    if ptr.is_null() || (data.is_null() && len > 0) {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    let slice = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }
+    };
+    match engine.push_audio_with_format(slice, sample_rate, channels as usize) {
+        Ok(_) => 0,
+        Err(e) => map_error_code(&e),
+    }
+}
+
+/// Get performance metrics as JSON (caller frees with engine_string_free).
+#[no_mangle]
+pub extern "C" fn engine_get_metrics(ptr: *mut Engine) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &*ptr };
+    let m = engine.get_metrics();
+    match serde_json::to_string(&m) {
+        Ok(json) => match CString::new(json) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Get last transcript (caller frees). Returns null if none.
+#[no_mangle]
+pub extern "C" fn engine_get_last_transcript(ptr: *mut Engine) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &*ptr };
+    match engine.last_transcript() {
+        Some(t) => match CString::new(t) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Load a Whisper model from absolute path (sets as active model).
+#[no_mangle]
+pub extern "C" fn engine_load_model(ptr: *mut Engine, path: *const c_char) -> c_int {
+    if ptr.is_null() || path.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    let cstr = unsafe { CStr::from_ptr(path) };
+    let p = match cstr.to_str() {
+        Ok(s) => PathBuf::from(s),
+        Err(_) => return -2,
+    };
+    match engine.load_model(&p) {
+        Ok(()) => 0,
+        Err(e) => map_error_code(&e),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_unload_model(ptr: *mut Engine) -> c_int {
+    if ptr.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    engine.unload_model();
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn engine_cancel_transcription(ptr: *mut Engine) -> c_int {
+    if ptr.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    engine.cancel_transcription();
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn engine_get_model_info(ptr: *mut Engine) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &*ptr };
+    match engine.get_model_info() {
+        Some(m) => match serde_json::to_string(&m) {
+            Ok(json) => match CString::new(json) {
+                Ok(cs) => cs.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            },
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }
+}
+
 fn map_error_code(e: &EngineError) -> c_int {
     match e {
         EngineError::InvalidTransition { .. } => 10,
@@ -245,6 +381,8 @@ fn map_error_code(e: &EngineError) -> c_int {
         EngineError::AlreadyInitialized => 12,
         EngineError::Storage(_) => 13,
         EngineError::SettingsValidation(_) => 14,
+        EngineError::Audio(_) => 15,
+        EngineError::Model(_) => 16,
     }
 }
 

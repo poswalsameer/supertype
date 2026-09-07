@@ -1,0 +1,44 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:supertype}/macos",
+      "name": "Debug Supertype (macos)",
+      "target": "Supertype",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug Supertype (macos)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:supertype}/macos",
+      "name": "Release Supertype (macos)",
+      "target": "Supertype",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release Supertype (macos)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:supertype}/macos",
+      "name": "Debug SupertypeFFITest (macos)",
+      "target": "SupertypeFFITest",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug SupertypeFFITest (macos)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:supertype}/macos",
+      "name": "Release SupertypeFFITest (macos)",
+      "target": "SupertypeFFITest",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release SupertypeFFITest (macos)"
+    }
+  ]
+}

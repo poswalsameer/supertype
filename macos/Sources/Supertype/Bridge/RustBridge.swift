@@ -110,8 +110,14 @@ public final class RustEngine: ObservableObject {
     @Published public private(set) var state: AppState = .idle
     @Published public private(set) var settings: AppSettings = .default
     @Published public private(set) var lastError: String?
+    @Published public private(set) var lastTranscript: String?
+    @Published public private(set) var partialTranscript: String?
+    @Published public private(set) var metricsJSON: String?
 
     public let objectWillChange = ObservableObjectPublisher()
+
+    /// Expose handle for AudioCapture (read-only).
+    var rustHandle: OpaquePointer? { handle }
 
     public init() {}
 
@@ -222,6 +228,86 @@ public final class RustEngine: ObservableObject {
         return false
     }
 
+    // MARK: Audio push (Phase 2)
+
+    @discardableResult
+    public func pushAudio(_ samples: [Float]) -> Bool {
+        #if canImport(CSupertypeCore)
+        guard let h = handle, !samples.isEmpty else { return false }
+        return samples.withUnsafeBufferPointer { buf in
+            let rc = engine_push_audio(h, buf.baseAddress, UInt(buf.count))
+            return rc == 0
+        }
+        #else
+        return false
+        #endif
+    }
+
+    @discardableResult
+    public func pushAudioWithFormat(_ samples: [Float], sampleRate: UInt32, channels: UInt32) -> Bool {
+        #if canImport(CSupertypeCore)
+        guard let h = handle, !samples.isEmpty else { return false }
+        return samples.withUnsafeBufferPointer { buf in
+            let rc = engine_push_audio_with_format(h, buf.baseAddress, UInt(buf.count), sampleRate, channels)
+            return rc == 0
+        }
+        #else
+        return false
+        #endif
+    }
+
+    public func getMetrics() -> String? {
+        #if canImport(CSupertypeCore)
+        guard let h = handle, let cstr = engine_get_metrics(h), let s = String(validatingUTF8: cstr) else { return nil }
+        engine_string_free(cstr)
+        metricsJSON = s
+        return s
+        #else
+        return nil
+        #endif
+    }
+
+    public func getLastTranscript() -> String? {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return nil }
+        if let cstr = engine_get_last_transcript(h) {
+            defer { engine_string_free(cstr) }
+            if let s = String(validatingUTF8: cstr) {
+                lastTranscript = s
+                return s
+            }
+        }
+        return nil
+        #else
+        return lastTranscript
+        #endif
+    }
+
+    @discardableResult
+    public func loadModel(at path: String) -> Bool {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return false }
+        let rc = path.withCString { cstr in engine_load_model(h, cstr) }
+        if rc == 0 { return true }
+        lastError = "load_model \(rc)"
+        return false
+        #else
+        return false
+        #endif
+    }
+
+    public func unloadModel() {
+        #if canImport(CSupertypeCore)
+        if let h = handle { _ = engine_unload_model(h) }
+        #endif
+    }
+
+    public func cancelTranscription() {
+        #if canImport(CSupertypeCore)
+        if let h = handle { _ = engine_cancel_transcription(h) }
+        #endif
+    }
+
     public func getSettings() -> AppSettings { settings }
 
     public func updateSettings(_ new: AppSettings) -> Bool {
@@ -306,6 +392,18 @@ public final class RustEngine: ObservableObject {
             if let s = AppState.allCases.first(where: { $0.displayName.lowercased() == to.lowercased() }) {
                 updateState(s)
             }
+        case .partialTranscript(let text):
+            partialTranscript = text
+            objectWillChange.send()
+        case .finalTranscript(let text):
+            lastTranscript = text
+            partialTranscript = nil
+            objectWillChange.send()
+            // Fetch metrics after final
+            _ = getMetrics()
+        case .speechDetected, .speechEnded:
+            // propagate for UI debugging
+            break
         default: break
         }
         NotificationCenter.default.post(name: .engineEvent, object: ev)

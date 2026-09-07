@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let engine = RustEngine()
     private var cancellables = Set<AnyCancellable>()
     private var overlay: OverlayWindowController?
+    private var audioCapture: AudioCapture?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -89,8 +90,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }.store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .engineStateChanged).sink { [weak self] _ in
-            DispatchQueue.main.async { self?.updateOverlay() }
+            DispatchQueue.main.async {
+                self?.updateOverlay()
+                self?.syncAudioCapture()
+            }
         }.store(in: &cancellables)
+
+        // Also poll transcript events for menu/log
+        NotificationCenter.default.publisher(for: .engineEvent).sink { note in
+            if let ev = note.object as? EngineEvent {
+                switch ev {
+                case .partialTranscript(let t): print("[Supertype] partial: \(t)")
+                case .finalTranscript(let t): print("[Supertype] final: \(t)")
+                default: break
+                }
+            }
+        }.store(in: &cancellables)
+    }
+
+    private func syncAudioCapture() {
+        switch engine.state {
+        case .recording:
+            if audioCapture == nil {
+                // Check mic permission first
+                let status = MicrophonePermission.shared.currentStatus()
+                if status != .authorized {
+                    print("[Supertype] Mic not authorized (\(status.rawValue)), requesting…")
+                    MicrophonePermission.shared.request { granted in
+                        DispatchQueue.main.async {
+                            if granted, let h = self.engine.rustHandle {
+                                let cap = AudioCapture()
+                                if cap.start(rustHandle: h) {
+                                    self.audioCapture = cap
+                                }
+                            } else if !granted {
+                                print("[Supertype] Mic denied — cannot capture")
+                                _ = self.engine.cancelRecording()
+                            }
+                        }
+                    }
+                    return
+                }
+                if let h = engine.rustHandle {
+                    let cap = AudioCapture()
+                    if cap.start(rustHandle: h) {
+                        audioCapture = cap
+                    }
+                }
+            }
+        default:
+            if audioCapture != nil {
+                audioCapture?.stop()
+                audioCapture = nil
+                // Metrics after stop
+                if let m = engine.getMetrics() {
+                    print("[Supertype] metrics: \(m)")
+                }
+                if let t = engine.getLastTranscript() {
+                    print("[Supertype] last transcript: \(t)")
+                }
+            }
+        }
     }
 
     private func updateMenuState() {
