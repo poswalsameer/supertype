@@ -158,7 +158,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func syncHotkeyFromSettings() {
-        let shortcut = engine.getSettings().globalShortcut
+        let settings = engine.getSettings()
+        let shortcut = settings.globalShortcut
+        let mode: HotkeyMode = settings.shortcutBehavior == "toggle" ? .toggle : .hold
+        hotkeyManager?.setMode(mode)
         if hotkeyManager?.configuredShortcut != shortcut {
             let ok = hotkeyManager?.register(shortcut: shortcut) ?? false
             if !ok, let err = hotkeyManager?.lastError {
@@ -197,12 +200,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         hotkeyManager = HotkeyManager()
         hotkeyManager?.onKeyDown = { [weak self] in self?.handleHotkeyDown() }
         hotkeyManager?.onKeyUp = { [weak self] in self?.handleHotkeyUp() }
-        let shortcut = engine.getSettings().globalShortcut
-        let ok = hotkeyManager?.register(shortcut: shortcut) ?? false
+        let settings = engine.getSettings()
+        hotkeyManager?.setMode(settings.shortcutBehavior == "toggle" ? .toggle : .hold)
+        let ok = hotkeyManager?.register(shortcut: settings.globalShortcut) ?? false
         if !ok {
-            print("[Supertype] Hotkey '\(shortcut)' registration failed: \(hotkeyManager?.lastError ?? "unknown")")
+            print("[Supertype] Hotkey '\(settings.globalShortcut)' registration failed: \(hotkeyManager?.lastError ?? "unknown")")
         } else {
-            print("[Supertype] Hotkey registered: \(shortcut)")
+            print("[Supertype] Hotkey registered: \(settings.globalShortcut) mode=\(settings.shortcutBehavior)")
         }
     }
 
@@ -255,10 +259,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         case .partialTranscript(let t):
             // Redact transcript in production logs — only length
             print("[Supertype] partial len=\(t.count)")
+            // Filter dummy in production (tests expect it, but prod should not inject placeholder)
+            if t.contains("[Dummy") { return }
             overlay?.showPartial(t)
         case .finalTranscript(let t):
+            // Drop dummy placeholder in production — treat as missing model error
+            if t.contains("[Dummy") || t.trimmingCharacters(in: .whitespaces).isEmpty {
+                print("[Supertype] dummy/empty transcript — model missing")
+                showTransientError("Model not ready — download in Settings → Speech")
+                _ = engine.cancelRecording()
+                return
+            }
             print("[Supertype] final len=\(t.count) app=\(lastActiveApp?.bundleId ?? "")")
-            // Insertion — no artificial delay, dispatch to background check then main inject
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 DispatchQueue.main.async { self?.insertTranscript(t) }
             }

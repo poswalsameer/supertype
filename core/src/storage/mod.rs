@@ -32,6 +32,8 @@ impl Storage {
             let _ = std::fs::create_dir_all(parent);
         }
         let conn = Connection::open(path)?;
+        // WAL + busy timeout for concurrent history writes during stop_recording
+        let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;");
         migrations::run_migrations(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -42,6 +44,7 @@ impl Storage {
     /// Open an in-memory database (useful for tests).
     pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
+        let _ = conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;");
         migrations::run_migrations(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

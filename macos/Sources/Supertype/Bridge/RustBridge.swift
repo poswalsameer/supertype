@@ -599,14 +599,13 @@ public final class RustEngine: ObservableObject {
 
     private func startPolling() {
         pollTimer?.cancel()
-        // Poll on background queue every 10ms while recording/processing to reduce latency, no main wake when idle
+        // Poll on background queue while recording/processing; 50ms keeps main wakeups low (was 20ms)
         let queue = DispatchQueue.global(qos: .userInitiated)
         var timer: AnyCancellable?
-        timer = Timer.publish(every: 0.02, on: .main, in: .common).autoconnect().sink { [weak self] _ in
+        timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self else { return }
-            // Do actual poll off main
             queue.async { self.pollRustEventsBackground() }
-            if self.state == .idle {
+            if self.state == .idle || self.state == .completed {
                 timer?.cancel()
                 self.pollTimer?.cancel()
             }
