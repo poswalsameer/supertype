@@ -1,0 +1,4 @@
+module CSupertypeCore {
+    header "include/supertype_core.h"
+    export *
+}

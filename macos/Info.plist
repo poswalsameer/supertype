@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Supertype</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.supertype.app</string>
+	<key>CFBundleName</key>
+	<string>Supertype</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>Supertype</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Supertype uses the microphone to transcribe your speech locally on-device. Audio is never sent to a server.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Supertype uses Accessibility to insert transcribed text into the app you are typing in.</string>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>

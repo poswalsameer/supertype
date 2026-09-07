@@ -1,0 +1,28 @@
+# Rust
+/target/
+core/target/
+**/*.rs.bk
+Cargo.lock
+
+# Swift / Xcode
+.macos/.build/
+macos/.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.playground/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+
+# App data (not repo)
+*.db
+*.db-journal
+
+# Secrets
+.env
+Secrets.plist

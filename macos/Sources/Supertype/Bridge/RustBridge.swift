@@ -1,0 +1,386 @@
+import Foundation
+import Combine
+
+#if canImport(CSupertypeCore)
+import CSupertypeCore
+#endif
+
+// MARK: - App State (mirrors Rust AppState)
+
+public enum AppState: UInt8, Codable, Equatable, CaseIterable {
+    case idle = 0
+    case preparing = 1
+    case recording = 2
+    case processing = 3
+    case completed = 4
+    case error = 5
+
+    var displayName: String {
+        switch self {
+        case .idle: return "Idle"
+        case .preparing: return "Preparing"
+        case .recording: return "Recording"
+        case .processing: return "Processing"
+        case .completed: return "Completed"
+        case .error: return "Error"
+        }
+    }
+}
+
+// MARK: - Settings (mirrors Rust Settings)
+
+public struct AppSettings: Codable, Equatable {
+    public var selectedMicrophoneId: String?
+    public var globalShortcut: String
+    public var selectedModelId: String
+    public var historyEnabled: Bool
+    public var launchAtLogin: Bool
+    public var overlayEnabled: Bool
+
+    public static var `default`: AppSettings {
+        AppSettings(
+            selectedMicrophoneId: nil,
+            globalShortcut: "fn",
+            selectedModelId: "whisper-tiny",
+            historyEnabled: true,
+            launchAtLogin: false,
+            overlayEnabled: true
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case selectedMicrophoneId = "selected_microphone_id"
+        case globalShortcut = "global_shortcut"
+        case selectedModelId = "selected_model_id"
+        case historyEnabled = "history_enabled"
+        case launchAtLogin = "launch_at_login"
+        case overlayEnabled = "overlay_enabled"
+    }
+}
+
+// MARK: - Engine Events
+
+public enum EngineEvent: Equatable {
+    case recordingStarted
+    case recordingStopped
+    case speechDetected
+    case speechEnded
+    case partialTranscript(String)
+    case finalTranscript(String)
+    case processingStarted
+    case processingCompleted
+    case error(String)
+    case stateChanged(from: String, to: String)
+    case unknown(String)
+
+    static func from(json: String) -> EngineEvent? {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String else { return nil }
+        switch type {
+        case "RecordingStarted": return .recordingStarted
+        case "RecordingStopped": return .recordingStopped
+        case "SpeechDetected": return .speechDetected
+        case "SpeechEnded": return .speechEnded
+        case "PartialTranscript": return .partialTranscript(obj["payload"] as? String ?? "")
+        case "FinalTranscript": return .finalTranscript(obj["payload"] as? String ?? "")
+        case "ProcessingStarted": return .processingStarted
+        case "ProcessingCompleted": return .processingCompleted
+        case "Error": return .error(obj["payload"] as? String ?? "unknown")
+        case "StateChanged":
+            if let payload = obj["payload"] as? [String: String] {
+                return .stateChanged(from: payload["from"] ?? "", to: payload["to"] ?? "")
+            }
+            return .stateChanged(from: "", to: "")
+        default: return .unknown(type)
+        }
+    }
+}
+
+// MARK: - Rust Engine Wrapper (FFI)
+
+/// Thin wrapper around the Rust `Engine` opaque pointer.
+/// All calls are synchronous and thread-safe (Rust side uses `parking_lot::Mutex`).
+/// Heavy work is never done on the caller thread beyond the mutex lock; actual
+/// audio/ML work will be offloaded in Phase 2 to a background Tokio runtime.
+public final class RustEngine: ObservableObject {
+    private var handle: OpaquePointer?
+    private var pollTimer: AnyCancellable?
+
+    @Published public private(set) var state: AppState = .idle
+    @Published public private(set) var settings: AppSettings = .default
+    @Published public private(set) var lastError: String?
+
+    public let objectWillChange = ObservableObjectPublisher()
+
+    public init() {}
+
+    deinit {
+        shutdown()
+    }
+
+    // MARK: Lifecycle
+
+    /// Initialize with a persistent database path under Application Support.
+    @discardableResult
+    public func initialize(dbPath: String? = nil) -> Bool {
+        // If Rust is linked, use FFI; otherwise fallback to Swift-only mock.
+        #if canImport(CSupertypeCore)
+        if Self.loadRustIfAvailable() {
+            return initializeViaRust(dbPath: dbPath)
+        }
+        #endif
+        return initializeMock(dbPath: dbPath)
+    }
+
+    public func shutdown() {
+        pollTimer?.cancel()
+        pollTimer = nil
+        #if canImport(CSupertypeCore)
+        if let h = handle {
+            engine_free(h)
+            handle = nil
+        }
+        #endif
+    }
+
+    // MARK: Commands (mirrors Rust API)
+
+    @discardableResult
+    public func startRecording() -> Bool {
+        #if canImport(CSupertypeCore)
+        if let h = handle {
+            let rc = engine_start_recording(h)
+            if rc == 0 { refreshState(); startPolling(); return true }
+            lastError = "start_recording failed code \(rc)"
+            return false
+        }
+        #endif
+        // Mock: transition logic mirrors Rust state machine
+        guard state == .idle else {
+            lastError = "invalid transition \(state) -> recording"
+            return false
+        }
+        updateState(.recording)
+        return true
+    }
+
+    @discardableResult
+    public func stopRecording() -> Bool {
+        #if canImport(CSupertypeCore)
+        if let h = handle {
+            let rc = engine_stop_recording(h)
+            if rc == 0 { refreshState(); return true }
+            lastError = "stop_recording failed \(rc)"
+            return false
+        }
+        #endif
+        guard state == .recording else {
+            lastError = "can only stop from recording, now \(state)"
+            return false
+        }
+        updateState(.processing)
+        // Simulate immediate completion (Phase 1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.updateState(.completed)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.acknowledge()
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    public func cancelRecording() -> Bool {
+        #if canImport(CSupertypeCore)
+        if let h = handle {
+            let rc = engine_cancel_recording(h)
+            if rc == 0 { refreshState(); return true }
+            return false
+        }
+        #endif
+        if state == .recording || state == .preparing || state == .processing {
+            updateState(.idle)
+            return true
+        }
+        return false
+    }
+
+    @discardableResult
+    public func acknowledge() -> Bool {
+        #if canImport(CSupertypeCore)
+        if let h = handle {
+            let rc = engine_acknowledge(h)
+            if rc == 0 { refreshState(); return true }
+            return false
+        }
+        #endif
+        if state == .completed || state == .error {
+            updateState(.idle)
+            return true
+        }
+        return false
+    }
+
+    public func getSettings() -> AppSettings { settings }
+
+    public func updateSettings(_ new: AppSettings) -> Bool {
+        // Validate (mirror Rust validation)
+        guard !new.globalShortcut.trimmingCharacters(in: .whitespaces).isEmpty,
+              !new.selectedModelId.trimmingCharacters(in: .whitespaces).isEmpty else {
+            lastError = "validation failed"
+            return false
+        }
+        #if canImport(CSupertypeCore)
+        if let h = handle {
+            guard let json = try? JSONEncoder().encode(new),
+                  let str = String(data: json, encoding: .utf8) else { return false }
+            let rc = str.withCString { cstr in engine_update_settings(h, cstr) }
+            if rc == 0 {
+                settings = new
+                objectWillChange.send()
+                return true
+            }
+            lastError = "engine_update_settings \(rc)"
+            return false
+        }
+        #endif
+        // Mock persistence: UserDefaults + SQLite via StorageManager later
+        settings = new
+        persistMockSettings(new)
+        objectWillChange.send()
+        return true
+    }
+
+    // MARK: Private
+
+    private func refreshState() {
+        #if canImport(CSupertypeCore)
+        if let h = handle {
+            let raw = engine_get_state(h)
+            if let s = AppState(rawValue: UInt8(max(0, raw))) {
+                updateState(s)
+            }
+        }
+        #endif
+    }
+
+    private func updateState(_ new: AppState) {
+        if state != new {
+            let old = state
+            state = new
+            objectWillChange.send()
+            // Publish state change; overlay observes this.
+            NotificationCenter.default.post(name: .engineStateChanged, object: nil, userInfo: ["from": old.displayName, "to": new.displayName])
+        }
+    }
+
+    private func startPolling() {
+        pollTimer?.cancel()
+        // Poll Rust events every 50ms while not idle (replaces broadcast)
+        pollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect().sink { [weak self] _ in
+            self?.pollRustEvents()
+            if self?.state == .idle || self?.state == .completed { self?.pollTimer?.cancel() }
+        }
+    }
+
+    private func pollRustEvents() {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return }
+        var out: UnsafeMutablePointer<CChar>? = nil
+        let rc = engine_poll_event(h, &out)
+        if rc == 1, let ptr = out, let json = String(validatingUTF8: ptr) {
+            engine_string_free(ptr)
+            if let ev = EngineEvent.from(json: json) {
+                handleEvent(ev)
+            }
+        } else if rc == 1, let ptr = out {
+            engine_string_free(ptr)
+        }
+        #endif
+    }
+
+    private func handleEvent(_ ev: EngineEvent) {
+        switch ev {
+        case .stateChanged(_, let to):
+            if let s = AppState.allCases.first(where: { $0.displayName.lowercased() == to.lowercased() }) {
+                updateState(s)
+            }
+        default: break
+        }
+        NotificationCenter.default.post(name: .engineEvent, object: ev)
+    }
+
+    // MARK: Rust dynamic loading fallback
+
+    private struct RustSymbols {
+        let new: () -> OpaquePointer?
+        let free: (OpaquePointer?) -> Void
+    }
+
+    private static func loadRustIfAvailable() -> Bool {
+        // We link statically, so if we are here and canImport, Rust is available.
+        // This helper just checks the dylib exists for diagnostic purposes.
+        return true
+    }
+
+    private func initializeViaRust(dbPath: String?) -> Bool {
+        #if canImport(CSupertypeCore)
+        let h = engine_new()
+        guard h != nil else { lastError = "engine_new failed"; return false }
+        handle = h
+        // Resolve DB path
+        let path: String
+        if let p = dbPath { path = p }
+        else { path = Self.defaultDBPath() }
+        let rc: Int32 = path.withCString { cstr in engine_initialize(h, cstr) }
+        if rc != 0 {
+            lastError = "engine_initialize \(rc) path=\(path)"
+            engine_free(h)
+            handle = nil
+            return false
+        }
+        // Load settings
+        if let cstr = engine_get_settings(h), let json = String(validatingUTF8: cstr) {
+            if let data = json.data(using: .utf8), let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
+                settings = decoded
+            }
+            engine_string_free(cstr)
+        }
+        refreshState()
+        startPolling()
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    private func initializeMock(dbPath: String?) -> Bool {
+        // Load from UserDefaults / file as mock persistence
+        if let data = UserDefaults.standard.data(forKey: "supertype.settings"),
+           let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
+            settings = decoded
+        }
+        state = .idle
+        return true
+    }
+
+    private func persistMockSettings(_ s: AppSettings) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: "supertype.settings")
+        }
+    }
+
+    static func defaultDBPath() -> String {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Supertype", isDirectory: true)
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("supertype.db").path
+    }
+}
+
+public extension Notification.Name {
+    static let engineStateChanged = Notification.Name("engineStateChanged")
+    static let engineEvent = Notification.Name("engineEvent")
+}
