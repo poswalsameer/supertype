@@ -19,7 +19,7 @@ final class OverlayWindowController {
     private func createPanelIfNeeded() {
         if panel != nil { return }
         let p = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 220, height: 56),
+            contentRect: NSRect(x: 0, y: 0, width: 280, height: 56),
             styleMask: [.nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -43,7 +43,7 @@ final class OverlayWindowController {
         let hv = NSHostingView(rootView: view)
         hv.translatesAutoresizingMaskIntoConstraints = false
         p.contentView = hv
-        p.setContentSize(NSSize(width: 220, height: 56))
+        p.setContentSize(NSSize(width: 280, height: 56))
         p.center()
         // Start hidden
         p.orderOut(nil)
@@ -65,7 +65,13 @@ final class OverlayWindowController {
             updateView(text: "Preparing…", color: .systemGray)
             show()
         case .recording:
-            updateView(text: "Listening…", color: .systemRed)
+            // If partial transcript exists, show it; otherwise Listening
+            if let partial = engine?.partialTranscript, !partial.isEmpty {
+                let truncated = String(partial.prefix(40))
+                updateView(text: truncated, color: .systemRed, isRecording: true)
+            } else {
+                updateView(text: "Listening…", color: .systemRed, isRecording: true)
+            }
             show()
         case .processing:
             updateView(text: "Processing…", color: .systemOrange)
@@ -85,19 +91,79 @@ final class OverlayWindowController {
         }
     }
 
-    private func updateView(text: String, color: NSColor) {
-        // SwiftUI view is immutable through hosting; rebuild for simplicity (cheap).
+    // Phase 3 additions
+
+    func showPartial(_ text: String) {
+        guard let panel, engine?.getSettings().overlayEnabled != false else { return }
+        let truncated = text.count > 40 ? String(text.prefix(40)) + "…" : text
+        updateView(text: truncated, color: .systemRed, isRecording: true)
+        show()
+    }
+
+    func showSuccess() {
+        guard let panel else { return }
+        updateView(text: "✓ Done", color: .systemGreen)
+        show()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.panel?.orderOut(nil)
+        }
+    }
+
+    func showError(_ msg: String) {
+        guard let panel else { return }
+        let truncated = msg.count > 32 ? String(msg.prefix(32)) : msg
+        updateView(text: truncated, color: .systemRed)
+        show()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.panel?.orderOut(nil)
+        }
+    }
+
+    private func updateView(text: String, color: NSColor, isRecording: Bool = false) {
         let state = engine?.state ?? .idle
-        let v = OverlayView(state: state, text: text, dotColor: Color(nsColor: color))
+        let v = OverlayView(state: state, text: text, dotColor: Color(nsColor: color), isRecording: isRecording || state == .recording)
         hosting?.rootView = v
+        // Widen panel if text long
+        let width = max(220, min(420, 40 + CGFloat(text.count) * 8))
+        panel?.setContentSize(NSSize(width: width, height: 56))
     }
 
     private func show() {
         guard let panel else { return }
         if !panel.isVisible {
-            panel.center()
+            // Try to position near cursor if possible, else center
+            if let cursorPos = focusedCursorPosition() {
+                let origin = NSPoint(x: cursorPos.x - 140, y: cursorPos.y + 20)
+                panel.setFrameOrigin(origin)
+            } else {
+                panel.center()
+            }
+            panel.orderFrontRegardless()
+            // Ensure we never become key window
+            panel.orderOut(nil)
             panel.orderFrontRegardless()
         }
+    }
+
+    private func focusedCursorPosition() -> NSPoint? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var focused: AnyObject?
+        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused as! AXUIElement? else { return nil }
+        var pos: AnyObject?
+        var size: AnyObject?
+        if AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &pos) == .success,
+           AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
+           let posVal = pos, let sizeVal = size {
+            var position = CGPoint.zero
+            var s = CGSize.zero
+            AXValueGetValue(posVal as! AXValue, .cgPoint, &position)
+            AXValueGetValue(sizeVal as! AXValue, .cgSize, &s)
+            // Convert Cocoa: position is bottom-left
+            return CGPoint(x: position.x + s.width/2, y: position.y - 20)
+        }
+        return nil
     }
 }
 
@@ -105,6 +171,7 @@ struct OverlayView: View {
     var state: AppState
     var text: String?
     var dotColor: Color = .red
+    var isRecording: Bool = false
 
     var body: some View {
         let label: String = text ?? {
@@ -120,17 +187,26 @@ struct OverlayView: View {
 
         HStack(spacing: 10) {
             Circle().fill(dotColor).frame(width: 10, height: 10)
-                .opacity(state == .recording ? 1 : 0.9)
-                .scaleEffect(state == .recording ? 1.1 : 1.0)
-                .animation(state == .recording ? .easeInOut(duration: 0.6).repeatForever(autoreverses: true) : .default, value: state)
-            Text(label).font(.system(.body, design: .rounded)).fontWeight(.medium)
+                .opacity(isRecording ? 1 : 0.9)
+                .scaleEffect(isRecording ? 1.1 : 1.0)
+                .animation(isRecording ? .easeInOut(duration: 0.6).repeatForever(autoreverses: true) : .default, value: state)
+            Text(label).font(.system(.body, design: .rounded)).fontWeight(.medium).lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 0)
+            if isRecording {
+                // Subtle waveform indication
+                HStack(spacing: 2) {
+                    ForEach(0..<3) { i in
+                        RoundedRectangle(cornerRadius: 1).fill(dotColor.opacity(0.6)).frame(width: 2, height: 8 + CGFloat(i*2))
+                            .animation(.easeInOut(duration: 0.4).repeatForever().delay(Double(i)*0.1), value: isRecording)
+                    }
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
         .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
-        .frame(width: 220, height: 56)
+        .frame(width: 280, height: 56)
     }
 }

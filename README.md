@@ -1,10 +1,10 @@
 # Supertype — Privacy-First Local Voice-to-Text for macOS
 
-> Phase 2 — Local Speech Engine (mic → VAD → Whisper, streaming, on-demand model)
+> Phase 3 — System-Wide Voice Typing (global hotkey → local transcribe → AX/clipboard inject)
 
 A local-first voice typing utility conceptually similar to Wispr Flow: hold a global shortcut, speak, release, and have text appear in the focused app — entirely on-device.
 
-**Status:** Phase 2 complete — local audio pipeline, VAD, quantized Whisper (on-demand), streaming partial/final transcripts, metrics/bench.
+**Status:** Phase 3 complete — hold-to-talk global hotkey, FocusManager, TextInjector (AX + clipboard fallback), deterministic formatter, transcript lifecycle (raw→formatted), SQLite history (app/bundle), overlay polish.
 
 ## Architecture at a Glance
 
@@ -69,19 +69,22 @@ swift build -c release --package-path macos
   /src/engine    AppState + Engine + events (streaming partial/final)
   /src/audio     ring (rtrb SPSC) + resample (mono 16k) + VAD (Silero-like) + pipeline
   /src/transcription  SpeechModel trait → WhisperCppModel (load/warm/cancel) + DummyModel
+  /src/transcript lifecycle (Raw→Formatted via formatter + dictionary)
+  /src/formatting deterministic (punct, new line, caps, dict)
   /src/models    ModelManager (discover/verify/download_url) + builtin catalog
   /src/performance  metrics (RTF, load, VAD, backend metal) + BenchmarkReport
+  /src/input     TextInjector trait + InsertionRequest
   /src/bin/bench  local benchmark (fixtures/*.wav, no network)
-  /include       C header for Swift (engine_push_audio, metrics, model)
+  /include       C header for Swift (push_audio, metrics, history, format, activeApp)
   /resources/models  on-demand Whisper quantized (download-model.sh)
   /resources/fixtures  hello/technical/longer wav (en)
 /macos           SwiftUI + AppKit shell
-  /Sources/Supertype/App      SupertypeApp + AppDelegate (AudioCapture lifecycle)
+  /Sources/Supertype/App      SupertypeApp + AppDelegate (hotkey+focus+inject lifecycle)
   /Sources/Supertype/Audio    AudioCapture (AVAudioEngine → Rust, 16k mono, Accelerate)
-  /Sources/Supertype/Bridge   RustBridge (FFI + partial/final/metrics + pushAudio)
-  /Sources/Supertype/UI       SettingsView, OverlayWindow (NSPanel)
-  /Sources/Supertype/Permissions  Microphone + Accessibility
-  /Sources/Supertype/Platform     LaunchAtLogin (SMAppService), HotkeyManager stub
+  /Sources/Supertype/Bridge   RustBridge (FFI + pushAudio + history/format + activeApp)
+  /Sources/Supertype/UI       SettingsView (General/Permissions/History/Models/Privacy), OverlayWindow (partial, anchored), HistoryView
+  /Sources/Supertype/Permissions  Microphone + Accessibility (+ Input Monitoring note)
+  /Sources/Supertype/Platform     LaunchAtLogin, HotkeyManager (InputController CGEventTap/NSEvent), ActiveApp, TextInjector/ClipboardFallback
   /Sources/CSupertypeCore     Clang module re-exporting C header
 /docs/architecture  Design rationale
 /docs/testing     Phase-wise testing playbooks (phase-1.md canonical, README routing)
@@ -112,12 +115,14 @@ Events exposed for Phase 2: `recording_started`, `recording_stopped`, `speech_de
 ## Testing
 
 ```sh
-./scripts/test-phase-2.sh           # one-command Phase 2 verification (67 tests + bench + FFI + swift)
-./scripts/test-phase-1.sh           # Phase 1 still green (subset)
+./scripts/test-phase-3.sh           # one-command Phase 3 verification (85 tests + bench + FFI + swift)
+./scripts/test-phase-2.sh           # Phase 2 still green
+./scripts/test-phase-1.sh           # Phase 1 still green
 cargo test --manifest-path core/Cargo.toml -- --nocapture
 cargo run --manifest-path core/Cargo.toml --bin bench  # 3 fixtures, RTF <1, backend metal
-cat docs/testing/phase-2.md         # Phase 2 playbook (mic→VAD→Whisper)
-cat docs/testing/phase-1.md         # Phase 1 playbook
+cat docs/testing/phase-3.md         # Phase 3 playbook (hotkey→inject)
+cat docs/testing/phase-2.md
+cat docs/testing/phase-1.md
 ```
 
 Full phase routing: [`docs/testing/README.md`](docs/testing/README.md).
@@ -130,10 +135,12 @@ Full phase routing: [`docs/testing/README.md`](docs/testing/README.md).
 # bench works without download (temp fake model) but real transcription needs the file
 ```
 
+Hold-to-talk: default `fn`, alternatives `ctrl+space` etc. — configurable in Settings → General. Works unfocused via `GlobalInputController` (CGEventTap/NSEvent). Dictation inserts via AX and clipboard fallback; history stored only when enabled.
+
 ## Next Phases
 
 - **Phase 2:** ✅ done — AVAudioEngine capture, ring → resample, VAD, whisper.cpp (quantized, on-demand), streaming, metrics/bench
-- **Phase 3:** Global hotkey (hold-to-talk), AX text insertion, formatter, history
+- **Phase 3:** ✅ done — global hotkey (hold/toggle), AX/clipboard TextInjector, ActiveApp, deterministic formatter, transcript lifecycle, SQLite history (bundle), overlay polish
 - **Phase 4:** Model catalog, downloads, Parakeet integration
 - **Phase 5:** Polish, latency/memory profiling, notarization
 

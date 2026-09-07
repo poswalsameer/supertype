@@ -10,9 +10,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::audio::pipeline::AudioPipeline;
+use crate::formatting::{apply_dictionary, format_transcript};
 use crate::performance::PerformanceMetrics;
 use crate::settings::Settings;
 use crate::storage::Storage;
+use crate::transcript::{FormattedTranscript, RawTranscript};
 use crate::transcription::whisper::WhisperCppModel;
 use crate::transcription::{DummyModel, SpeechModel};
 
@@ -57,6 +59,11 @@ struct Inner {
     model_path: Option<PathBuf>,
     recording_start: Option<Instant>,
     last_transcript: Option<String>,
+    // Phase 3: active app context
+    active_bundle_id: Option<String>,
+    active_app_name: Option<String>,
+    // Last formatted transcript for injection
+    last_formatted: Option<String>,
 }
 
 impl Engine {
@@ -76,6 +83,9 @@ impl Engine {
                 model_path: None,
                 recording_start: None,
                 last_transcript: None,
+                active_bundle_id: None,
+                active_app_name: None,
+                last_formatted: None,
             })),
         }
     }
@@ -386,6 +396,87 @@ impl Engine {
         }
     }
 
+    // ── Active app context ─────────────────────────────────────
+
+    pub fn set_active_app(&self, bundle_id: Option<String>, app_name: Option<String>) {
+        let mut g = self.inner.lock();
+        g.active_bundle_id = bundle_id.filter(|s| !s.trim().is_empty());
+        g.active_app_name = app_name.filter(|s| !s.trim().is_empty());
+    }
+
+    pub fn get_active_app(&self) -> (Option<String>, Option<String>) {
+        let g = self.inner.lock();
+        (g.active_bundle_id.clone(), g.active_app_name.clone())
+    }
+
+    // ── History ────────────────────────────────────────────────
+
+    pub fn get_history(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::storage::HistoryRecord>, String> {
+        let g = self.inner.lock();
+        if let Some(storage) = &g.storage {
+            storage.get_history(limit, offset)
+        } else {
+            Err("storage not initialized".into())
+        }
+    }
+
+    pub fn delete_history(&self, id: i64) -> Result<bool, String> {
+        let g = self.inner.lock();
+        if let Some(storage) = &g.storage {
+            storage.delete_history(id)
+        } else {
+            Err("storage not initialized".into())
+        }
+    }
+
+    pub fn clear_history(&self) -> Result<(), String> {
+        let g = self.inner.lock();
+        if let Some(storage) = &g.storage {
+            storage.clear_history()
+        } else {
+            Err("storage not initialized".into())
+        }
+    }
+
+    pub fn search_history(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::storage::HistoryRecord>, String> {
+        let g = self.inner.lock();
+        if let Some(storage) = &g.storage {
+            storage.search_history(query, limit)
+        } else {
+            Err("storage not initialized".into())
+        }
+    }
+
+    pub fn format_text(&self, raw: &str) -> String {
+        // Apply formatter + dictionary
+        let dict = {
+            let g = self.inner.lock();
+            g.storage
+                .as_ref()
+                .and_then(|s| s.get_dictionary().ok())
+                .unwrap_or_default()
+        };
+        let formatted = format_transcript(raw);
+        apply_dictionary(&formatted, &dict)
+    }
+
+    pub fn get_history_count(&self) -> i64 {
+        let g = self.inner.lock();
+        if let Some(storage) = &g.storage {
+            storage.history_count().unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
     // ── Commands ───────────────────────────────────────────────
 
     pub fn start_recording(&self) -> EngineResult<()> {
@@ -471,24 +562,55 @@ impl Engine {
             }
             g.metrics.backend = Some(PerformanceMetrics::backend());
 
-            // Emit transcript events
-            if !transcript.is_empty() {
+            // Transcript lifecycle: raw → formatted → injection
+            // Apply deterministic formatter + dictionary
+            let formatted = if transcript.is_empty() {
+                String::new()
+            } else {
+                let dict = g
+                    .storage
+                    .as_ref()
+                    .and_then(|s| s.get_dictionary().ok())
+                    .unwrap_or_default();
+                let raw = RawTranscript {
+                    text: transcript.clone(),
+                    is_final: true,
+                    confidence: Some(0.95),
+                };
+                let fmt = FormattedTranscript::from_raw(raw, &dict);
+                fmt.formatted
+            };
+
+            // Emit transcript events (raw for debugging, formatted for insertion)
+            if !formatted.is_empty() {
                 // Also emit speech_ended if VAD was in speech
                 if g.audio_pipeline.vad().is_in_speech() {
                     g.events.push_back(EngineEvent::SpeechEnded);
                 }
                 g.events
-                    .push_back(EngineEvent::FinalTranscript(transcript.clone()));
+                    .push_back(EngineEvent::FinalTranscript(formatted.clone()));
                 // Persist to history if enabled
                 if g.settings.history_enabled {
                     if let Some(storage) = &g.storage {
                         let model_id = g.settings.selected_model_id.clone();
-                        let _ = storage.push_history(&transcript, &model_id);
+                        let bundle = g.active_bundle_id.clone();
+                        let app_name = g.active_app_name.clone();
+                        let duration = duration_ms as i64;
+                        let _ = storage.push_history_detailed(
+                            &formatted,
+                            &model_id,
+                            Some(duration),
+                            bundle.as_deref(),
+                            app_name.as_deref(),
+                            Some(0.95),
+                        );
                     }
                 }
+                g.last_transcript = Some(transcript.clone());
+                g.last_formatted = Some(formatted);
+            } else if !transcript.is_empty() {
+                // Raw was non-empty but formatted became empty (unlikely) — still persist raw?
                 g.last_transcript = Some(transcript);
-            } else {
-                // Still emit final with empty for pipeline consistency? No, skip.
             }
             // Update peak memory estimate (pending size)
             g.metrics.peak_memory_mb = Some((pending.len() * 4 / (1024 * 1024)) as u64 + 20);
@@ -507,6 +629,7 @@ impl Engine {
                     g.pending_pcm.clear();
                     g.audio_pipeline.reset();
                     g.last_transcript = None;
+                    g.last_formatted = None;
                     if let Some(model) = g.asr_model.as_ref() {
                         model.cancel();
                     }
@@ -531,6 +654,8 @@ impl Engine {
                     let mut g = self.inner.lock();
                     g.pending_pcm.clear();
                     g.last_transcript = None;
+                    g.last_formatted = None;
+                    // Keep active_app until next capture; don't clear here to allow insertion after ack
                 }
                 self.transition(AppState::Idle)?;
                 Ok(())

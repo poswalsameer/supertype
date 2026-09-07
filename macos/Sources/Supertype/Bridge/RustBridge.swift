@@ -308,6 +308,98 @@ public final class RustEngine: ObservableObject {
         #endif
     }
 
+    // MARK: Phase 3 — Active app + History + Formatter
+
+    public struct HistoryRecord: Codable, Identifiable {
+        public let id: Int64
+        public let text: String
+        public let model_id: String
+        public let created_at: String
+        public let duration_ms: Int64?
+        public let bundle_id: String?
+        public let app_name: String?
+        public let confidence: Float?
+    }
+
+    public func setActiveApp(bundleId: String?, appName: String?) {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return }
+        if let bid = bundleId, let aname = appName {
+            bid.withCString { b in aname.withCString { a in _ = engine_set_active_app(h, b, a) } }
+        } else if let bid = bundleId {
+            bid.withCString { b in _ = engine_set_active_app(h, b, nil) }
+        } else if let aname = appName {
+            aname.withCString { a in _ = engine_set_active_app(h, nil, a) }
+        } else {
+            _ = engine_set_active_app(h, nil, nil)
+        }
+        #endif
+    }
+
+    public func formatText(_ raw: String) -> String {
+        #if canImport(CSupertypeCore)
+        guard let h = handle, let cstr = raw.withCString({ engine_format_text(h, $0) }), let s = String(validatingUTF8: cstr) else { return raw }
+        engine_string_free(cstr)
+        return s
+        #else
+        return raw
+        #endif
+    }
+
+    public func getHistory(limit: Int64 = 50, offset: Int64 = 0) -> [HistoryRecord] {
+        #if canImport(CSupertypeCore)
+        guard let h = handle, let cstr = engine_get_history(h, limit, offset), let json = String(validatingUTF8: cstr) else { return [] }
+        engine_string_free(cstr)
+        if let data = json.data(using: .utf8), let recs = try? JSONDecoder().decode([HistoryRecord].self, from: data) {
+            return recs
+        }
+        return []
+        #else
+        return []
+        #endif
+    }
+
+    public func deleteHistory(id: Int64) -> Bool {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return false }
+        let rc = engine_delete_history(h, id)
+        return rc == 0
+        #else
+        return false
+        #endif
+    }
+
+    public func clearHistory() -> Bool {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return false }
+        return engine_clear_history(h) == 0
+        #else
+        return false
+        #endif
+    }
+
+    public func searchHistory(query: String, limit: Int64 = 20) -> [HistoryRecord] {
+        #if canImport(CSupertypeCore)
+        guard let h = handle, let cstr = query.withCString({ engine_search_history(h, $0, limit) }), let json = String(validatingUTF8: cstr) else { return [] }
+        engine_string_free(cstr)
+        if let data = json.data(using: .utf8), let recs = try? JSONDecoder().decode([HistoryRecord].self, from: data) {
+            return recs
+        }
+        return []
+        #else
+        return []
+        #endif
+    }
+
+    public func getHistoryCount() -> Int64 {
+        #if canImport(CSupertypeCore)
+        guard let h = handle else { return 0 }
+        return engine_get_history_count(h)
+        #else
+        return 0
+        #endif
+    }
+
     public func getSettings() -> AppSettings { settings }
 
     public func updateSettings(_ new: AppSettings) -> Bool {

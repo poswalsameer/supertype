@@ -1,16 +1,28 @@
 pub mod migrations;
 
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::settings::Settings;
 
-/// Thin SQLite wrapper with migration support. For Phase 1 a single
-/// Mutex-guarded connection is sufficient; Phase 2 can move to a pool if needed.
+/// Thin SQLite wrapper with migration support.
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
     path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryRecord {
+    pub id: i64,
+    pub text: String,
+    pub model_id: String,
+    pub created_at: String,
+    pub duration_ms: Option<i64>,
+    pub bundle_id: Option<String>,
+    pub app_name: Option<String>,
+    pub confidence: Option<f32>,
 }
 
 impl Storage {
@@ -69,16 +81,28 @@ impl Storage {
         }
     }
 
-    // ── History (Phase 1: schema only, minimal helper) ──────────
+    // ── History ──────────────────────────────────────────────────
 
     pub fn push_history(&self, text: &str, model_id: &str) -> Result<i64, String> {
+        self.push_history_detailed(text, model_id, None, None, None, None)
+    }
+
+    pub fn push_history_detailed(
+        &self,
+        text: &str,
+        model_id: &str,
+        duration_ms: Option<i64>,
+        bundle_id: Option<&str>,
+        app_name: Option<&str>,
+        confidence: Option<f32>,
+    ) -> Result<i64, String> {
         if text.trim().is_empty() {
             return Err("history text must not be empty".into());
         }
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO transcription_history(text, model_id) VALUES(?1, ?2)",
-            params![text, model_id],
+            "INSERT INTO transcription_history(text, model_id, duration_ms, bundle_id, app_name, confidence) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![text, model_id, duration_ms, bundle_id, app_name, confidence],
         )
         .map_err(|e| e.to_string())?;
         Ok(conn.last_insert_rowid())
@@ -94,6 +118,78 @@ impl Storage {
         Ok(c)
     }
 
+    pub fn get_history(&self, limit: i64, offset: i64) -> Result<Vec<HistoryRecord>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, text, model_id, created_at, duration_ms, bundle_id, app_name, confidence FROM transcription_history ORDER BY created_at DESC, id DESC LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![limit, offset], |r| {
+                Ok(HistoryRecord {
+                    id: r.get(0)?,
+                    text: r.get(1)?,
+                    model_id: r.get(2)?,
+                    created_at: r.get(3)?,
+                    duration_ms: r.get(4)?,
+                    bundle_id: r.get(5)?,
+                    app_name: r.get(6)?,
+                    confidence: r.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_history(&self, id: i64) -> Result<bool, String> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn
+            .execute("DELETE FROM transcription_history WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    pub fn clear_history(&self) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM transcription_history", [])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn search_history(&self, query: &str, limit: i64) -> Result<Vec<HistoryRecord>, String> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, text, model_id, created_at, duration_ms, bundle_id, app_name, confidence FROM transcription_history WHERE text LIKE ?1 ORDER BY created_at DESC LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![pattern, limit], |r| {
+                Ok(HistoryRecord {
+                    id: r.get(0)?,
+                    text: r.get(1)?,
+                    model_id: r.get(2)?,
+                    created_at: r.get(3)?,
+                    duration_ms: r.get(4)?,
+                    bundle_id: r.get(5)?,
+                    app_name: r.get(6)?,
+                    confidence: r.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
     // ── Dictionary placeholder ───────────────────────────────────
 
     pub fn upsert_dictionary(&self, phrase: &str, replacement: &str) -> Result<(), String> {
@@ -107,6 +203,22 @@ impl Storage {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn get_dictionary(&self) -> Result<std::collections::HashMap<String, String>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT phrase, replacement FROM dictionary_entries")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            let (k, v) = r.map_err(|e| e.to_string())?;
+            map.insert(k, v);
+        }
+        Ok(map)
     }
 }
 
@@ -142,11 +254,53 @@ mod tests {
     }
 
     #[test]
+    fn history_detailed_and_fetch() {
+        let s = Storage::open_in_memory().unwrap();
+        s.push_history_detailed(
+            "hello",
+            "whisper-tiny",
+            Some(1200),
+            Some("com.apple.TextEdit"),
+            Some("TextEdit"),
+            Some(0.95),
+        )
+        .unwrap();
+        let recs = s.get_history(10, 0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].text, "hello");
+        assert_eq!(recs[0].bundle_id.as_deref(), Some("com.apple.TextEdit"));
+        assert_eq!(recs[0].app_name.as_deref(), Some("TextEdit"));
+        assert_eq!(recs[0].duration_ms, Some(1200));
+    }
+
+    #[test]
+    fn history_delete_and_clear() {
+        let s = Storage::open_in_memory().unwrap();
+        let id1 = s.push_history("a", "m").unwrap();
+        let id2 = s.push_history("b", "m").unwrap();
+        assert_eq!(s.history_count().unwrap(), 2);
+        assert!(s.delete_history(id1).unwrap());
+        assert_eq!(s.history_count().unwrap(), 1);
+        s.clear_history().unwrap();
+        assert_eq!(s.history_count().unwrap(), 0);
+        let _ = id2;
+    }
+
+    #[test]
+    fn history_search() {
+        let s = Storage::open_in_memory().unwrap();
+        s.push_history("hello world", "m").unwrap();
+        s.push_history("goodbye", "m").unwrap();
+        let res = s.search_history("hello", 10).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].text, "hello world");
+    }
+
+    #[test]
     fn dictionary_upsert() {
         let s = Storage::open_in_memory().unwrap();
         s.upsert_dictionary("wisp er", "Wispr").unwrap();
         s.upsert_dictionary("wisp er", "Wispr Flow").unwrap();
-        // Verify replacement updated
         let conn = s.conn.lock().unwrap();
         let val: String = conn
             .query_row(
@@ -171,7 +325,6 @@ mod tests {
             })
             .unwrap();
         }
-        // Reopen
         let s2 = Storage::open(&path).unwrap();
         let loaded = s2.load_settings().unwrap();
         assert_eq!(loaded.selected_model_id, "whisper-base");

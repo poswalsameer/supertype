@@ -17,6 +17,7 @@ pub mod models;
 pub mod performance;
 pub mod settings;
 pub mod storage;
+pub mod transcript;
 pub mod transcription;
 
 use engine::{Engine, EngineError};
@@ -372,6 +373,132 @@ pub extern "C" fn engine_get_model_info(ptr: *mut Engine) -> *mut c_char {
         },
         None => std::ptr::null_mut(),
     }
+}
+
+/// Set active app context (bundle id + app name) for next history entry.
+#[no_mangle]
+pub extern "C" fn engine_set_active_app(
+    ptr: *mut Engine,
+    bundle_id: *const c_char,
+    app_name: *const c_char,
+) -> c_int {
+    if ptr.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    let bid = if bundle_id.is_null() {
+        None
+    } else {
+        let cstr = unsafe { CStr::from_ptr(bundle_id) };
+        cstr.to_str().ok().map(|s| s.to_string())
+    };
+    let aname = if app_name.is_null() {
+        None
+    } else {
+        let cstr = unsafe { CStr::from_ptr(app_name) };
+        cstr.to_str().ok().map(|s| s.to_string())
+    };
+    engine.set_active_app(bid, aname);
+    0
+}
+
+/// Format raw transcript deterministically (no side effects).
+#[no_mangle]
+pub extern "C" fn engine_format_text(ptr: *mut Engine, raw: *const c_char) -> *mut c_char {
+    if ptr.is_null() || raw.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &*ptr };
+    let cstr = unsafe { CStr::from_ptr(raw) };
+    let s = match cstr.to_str() {
+        Ok(v) => v,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let formatted = engine.format_text(s);
+    match CString::new(formatted) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Get history as JSON array (limit/offset).
+#[no_mangle]
+pub extern "C" fn engine_get_history(ptr: *mut Engine, limit: i64, offset: i64) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &*ptr };
+    match engine.get_history(limit, offset) {
+        Ok(v) => match serde_json::to_string(&v) {
+            Ok(json) => match CString::new(json) {
+                Ok(cs) => cs.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            },
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_delete_history(ptr: *mut Engine, id: i64) -> c_int {
+    if ptr.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    match engine.delete_history(id) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(_) => -2,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_clear_history(ptr: *mut Engine) -> c_int {
+    if ptr.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    match engine.clear_history() {
+        Ok(()) => 0,
+        Err(_) => -2,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_search_history(
+    ptr: *mut Engine,
+    query: *const c_char,
+    limit: i64,
+) -> *mut c_char {
+    if ptr.is_null() || query.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &*ptr };
+    let cstr = unsafe { CStr::from_ptr(query) };
+    let q = match cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    match engine.search_history(q, limit) {
+        Ok(v) => match serde_json::to_string(&v) {
+            Ok(json) => match CString::new(json) {
+                Ok(cs) => cs.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            },
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn engine_get_history_count(ptr: *mut Engine) -> i64 {
+    if ptr.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*ptr };
+    engine.get_history_count()
 }
 
 fn map_error_code(e: &EngineError) -> c_int {

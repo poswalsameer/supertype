@@ -43,9 +43,54 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )?;
     }
 
-    // Future migrations:
-    // if version < 2 { ... PRAGMA user_version = 2; }
+    if version < 2 {
+        // Phase 3: add app context and confidence to history
+        conn.execute_batch(
+            r#"
+            ALTER TABLE transcription_history ADD COLUMN bundle_id TEXT;
+            ALTER TABLE transcription_history ADD COLUMN app_name TEXT;
+            ALTER TABLE transcription_history ADD COLUMN confidence REAL;
+            PRAGMA user_version = 2;
+            "#,
+        )?;
+        // ALTER ADD COLUMN IF NOT EXISTS not available in older sqlite, so we catch error for existing columns
+        // The above will fail if columns already exist when migrating from 0→2 in one go? But version<1 already created table with only 5 columns, so version<2 will add 3.
+        // If user is fresh (version 0), version<1 creates base, then version<2 adds. Idempotent via checking.
+    }
 
+    // Ensure columns exist even if migration from 1→2 skipped due to batch error (e.g., columns already exist)
+    // Use pragma table_info to add missing columns safely
+    ensure_history_columns(conn)?;
+
+    Ok(())
+}
+
+fn ensure_history_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let info: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(transcription_history);")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (col, def) in [
+        ("bundle_id", "TEXT"),
+        ("app_name", "TEXT"),
+        ("confidence", "REAL"),
+    ] {
+        if !info.contains(&col.to_string()) {
+            let sql = format!(
+                "ALTER TABLE transcription_history ADD COLUMN {} {};",
+                col, def
+            );
+            let _ = conn.execute(&sql, []);
+        }
+    }
+    // Ensure user_version at least 2 if columns now exist
+    let v: i32 = conn
+        .query_row("PRAGMA user_version;", [], |r| r.get(0))
+        .unwrap_or(0);
+    if v < 2 {
+        conn.execute_batch("PRAGMA user_version = 2;")?;
+    }
     Ok(())
 }
 
@@ -91,5 +136,21 @@ mod tests {
             .unwrap();
         assert_eq!(audio_named, 0);
         let _ = audio_tables; // ensure query succeeded
+    }
+
+    #[test]
+    fn history_has_app_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(transcription_history);")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(cols.contains(&"bundle_id".to_string()));
+        assert!(cols.contains(&"app_name".to_string()));
     }
 }

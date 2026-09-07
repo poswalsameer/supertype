@@ -1,29 +1,35 @@
 import SwiftUI
 import ServiceManagement
+import AVFoundation
 
 struct SettingsView: View {
     @EnvironmentObject var engine: RustEngine
     @StateObject private var micPermission = MicrophonePermission.shared
     @StateObject private var axPermission = AccessibilityPermission.shared
+    @StateObject private var hotkeyManager = HotkeyManager()
     @State private var launchAtLogin: Bool = false
     @State private var selectedTab: String = "General"
+    @State private var hotkeyInput: String = "fn"
+    @State private var hotkeyError: String?
 
     var body: some View {
         TabView(selection: $selectedTab) {
             generalTab.tabItem { Label("General", systemImage: "gear") }.tag("General")
             permissionsTab.tabItem { Label("Permissions", systemImage: "lock.shield") }.tag("Permissions")
+            historyTab.tabItem { Label("History", systemImage: "clock") }.tag("History")
             modelsTab.tabItem { Label("Models", systemImage: "cpu") }.tag("Models")
             privacyTab.tabItem { Label("Privacy", systemImage: "hand.raised") }.tag("Privacy")
         }
-        .frame(width: 560, height: 420)
+        .frame(width: 620, height: 480)
         .padding()
-        .onAppear { syncFromEngine() }
+        .onAppear { syncFromEngine(); hotkeyInput = engine.getSettings().globalShortcut }
         .onReceive(engine.objectWillChange) { _ in syncFromEngine() }
     }
 
     private func syncFromEngine() {
         let s = engine.getSettings()
         launchAtLogin = s.launchAtLogin
+        if hotkeyInput != s.globalShortcut { hotkeyInput = s.globalShortcut }
     }
 
     // MARK: General
@@ -40,23 +46,34 @@ struct SettingsView: View {
                     }
                 )) {
                     Text("System Default").tag("default")
-                    // Phase 2 will enumerate devices via AVAudioSession
+                    ForEach(availableMicrophones(), id: \.self) { name in
+                        Text(name).tag(name)
+                    }
                 }
-                Text("Phase 1 uses the system default input. Device enumeration lands in Phase 2.")
+                Text("System default is used unless you pick a specific device. Changes take effect on next recording.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Hotkey") {
-                TextField("Global Shortcut", text: Binding(
-                    get: { engine.getSettings().globalShortcut },
-                    set: { new in
-                        var s = engine.getSettings()
-                        s.globalShortcut = new
-                        _ = engine.updateSettings(s)
+                HStack {
+                    TextField("Global Shortcut", text: $hotkeyInput)
+                        .onSubmit { applyHotkey() }
+                    Button("Apply") { applyHotkey() }
+                    if hotkeyManager.isRegistered {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
-                ))
-                Text("Hold this shortcut to dictate. Global registration arrives in Phase 3.")
+                }
+                if let err = hotkeyError ?? hotkeyManager.lastError {
+                    Text(err).font(.caption).foregroundStyle(.red)
+                }
+                Text("Hold this shortcut to dictate. Works even when Supertype is not focused. Default: “fn”. Alternatives: “ctrl+space”, “option+space”, “cmd+shift+space”.")
                     .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Use fn") { hotkeyInput = "fn"; applyHotkey() }
+                    Button("Use ctrl+space") { hotkeyInput = "ctrl+space"; applyHotkey() }
+                }.font(.caption)
             }
 
             Section("Behavior") {
@@ -88,12 +105,55 @@ struct SettingsView: View {
                     Spacer()
                     Text(engine.getSettings().selectedModelId).foregroundStyle(.secondary)
                 }
+                if let t = engine.lastTranscript {
+                    VStack(alignment: .leading) {
+                        Text("Last transcript:").font(.caption).foregroundStyle(.secondary)
+                        Text(t).font(.caption)
+                    }
+                    HStack {
+                        Button("Copy Last") { copyLast() }
+                        Button("Clear") { _ = engine.acknowledge() }
+                    }.font(.caption)
+                }
                 if let err = engine.lastError {
                     Text(err).font(.caption).foregroundStyle(.red)
+                }
+                if let partial = engine.partialTranscript, !partial.isEmpty {
+                    Text("Partial: \(partial)").font(.caption).foregroundStyle(.orange).lineLimit(2)
                 }
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func applyHotkey() {
+        let trimmed = hotkeyInput.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { hotkeyError = "shortcut empty"; return }
+        let ok = hotkeyManager.register(shortcut: trimmed)
+        if ok {
+            var s = engine.getSettings()
+            s.globalShortcut = trimmed
+            if engine.updateSettings(s) {
+                hotkeyError = nil
+            } else {
+                hotkeyError = "failed to save"
+            }
+        } else {
+            hotkeyError = hotkeyManager.lastError ?? "registration failed (conflict?)"
+        }
+    }
+
+    private func availableMicrophones() -> [String] {
+        // Simple enumeration via AVFoundation (macOS)
+        let discovery = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInMicrophone, .externalUnknown], mediaType: .audio, position: .unspecified)
+        return discovery.devices.map { $0.localizedName }
+    }
+
+    private func copyLast() {
+        if let t = engine.lastTranscript {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(t, forType: .string)
+        }
     }
 
     // MARK: Permissions
@@ -112,26 +172,49 @@ struct SettingsView: View {
                     Button("Request Microphone Access") { micPermission.request() }
                     Button("Open System Settings") { micPermission.openSystemSettings() }
                 }
+                if micPermission.status == .denied {
+                    Text("Denied — enable in System Settings → Privacy & Security → Microphone, then relaunch.")
+                        .font(.caption).foregroundStyle(.red)
+                }
             }
-            Section("Accessibility") {
+            Section("Accessibility — Text Insertion") {
                 HStack {
                     Circle().fill(axPermission.isGranted ? Color.green : Color.orange).frame(width: 10, height: 10)
                     Text(axPermission.statusLabel).font(.headline)
                     Spacer()
                 }
-                Text("Required to insert dictated text into other apps (Slack, browsers, editors). Not requested at launch; only when you first dictate.")
+                Text("Required to insert dictated text into Slack, browsers, editors etc. If denied, Supertype falls back to clipboard paste (you still need to press Cmd+V).")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("Check Accessibility") { _ = axPermission.isTrusted() }
                     Button("Open System Settings") { axPermission.openSystemSettings() }
                 }
+                if !axPermission.isGranted {
+                    Text("Not granted — System Settings → Privacy & Security → Accessibility → enable Supertype.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+            Section("Input Monitoring (Global Hotkey)") {
+                Text("Global hotkey (e.g. holding fn) uses Event Tap. If the shortcut does not trigger, grant Input Monitoring to Supertype in System Settings → Privacy & Security → Input Monitoring.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Open Input Monitoring Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
             }
             Section {
-                Text("If denied, go to System Settings → Privacy & Security → Microphone / Accessibility and enable Supertype, then relaunch.")
+                Text("Supertype does not prompt repeatedly. It checks permissions only when you try to record or insert.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+    }
+
+    // MARK: History
+
+    private var historyTab: some View {
+        HistoryView().environmentObject(engine)
     }
 
     // MARK: Models
@@ -147,12 +230,13 @@ struct SettingsView: View {
                     Text("Whisper Base (74M)").tag("whisper-base")
                     Text("Parakeet TDT 0.6B").tag("parakeet-tdt-0.6b")
                 }
-                Text("Model catalog and downloads land in Phase 4. Switching here validates persistence and state plumbing.")
+                Text("Model catalog and on-demand downloads land in Phase 4. Switching here validates persistence and uses on-demand script.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Storage") {
-                Text("Models are stored under Application Support and are not bundled with the installer.")
+                Text("Models are stored under Application Support/Supertype/models and via resources/models. Use ./scripts/download-model.sh.")
                     .font(.caption).foregroundStyle(.secondary)
+                Text("Current: \(engine.getSettings().selectedModelId)").font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -161,14 +245,20 @@ struct SettingsView: View {
     private var privacyTab: some View {
         Form {
             Section("Principles") {
-                Text("• Audio stays in memory → VAD → ASR → text → discard. Never persisted.\n• No cloud transcription, no telemetry by default.\n• Production logs never include transcript content.\n• History can be disabled entirely.")
+                Text("• Audio stays in memory → VAD → ASR → formatted text → discard. Never persisted.\n• No cloud transcription, no telemetry by default.\n• Production logs never include transcript content.\n• History can be disabled entirely and stores only formatted text.")
                     .font(.callout)
             }
             Section("Data") {
-                Button("Clear Transcription History (Phase 3)") { }
-                    .disabled(true)
+                HStack {
+                    Text("History entries: \(engine.getHistoryCount())")
+                    Spacer()
+                    Button("Clear History") { _ = engine.clearHistory() }
+                    Button("Reveal DB") { StorageManager.shared.revealInFinder() }
+                }
                 Text("SQLite lives at ~/Library/Application Support/Supertype/supertype.db")
                     .font(.caption).foregroundStyle(.secondary)
+                Text("When history is disabled, no transcript content is written.")
+                    .font(.caption).foregroundStyle(.orange)
             }
         }
         .formStyle(.grouped)

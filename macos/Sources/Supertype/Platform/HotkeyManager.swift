@@ -1,21 +1,138 @@
 import Foundation
+import AppKit
+import Combine
 
-/// Phase 1 placeholder for global hotkey registration.
-/// Hold-to-talk will be implemented in Phase 3 via CGEventTap / Carbon hotkeys.
-/// This stub validates the architecture without capturing keys yet.
+enum HotkeyMode { case hold, toggle }
+
+/// Dedicated InputController abstraction (Phase 3).
+/// Owns global shortcut registration, handles press/hold/release, avoids polling.
 final class HotkeyManager: ObservableObject {
     @Published var configuredShortcut: String = "fn"
     @Published var isRegistered: Bool = false
+    @Published var lastError: String?
 
-    func register(shortcut: String) -> Bool {
-        // Phase 3: translate string → keycode+modifiers, register CGEventTap
-        configuredShortcut = shortcut
-        isRegistered = false // not yet active in Phase 1
-        print("[Supertype] HotkeyManager placeholder: would register '\(shortcut)' in Phase 3")
-        return true
+    private var globalMonitors: [Any] = []
+    private var localMonitors: [Any] = []
+    private var isKeyDown = false
+    private var mode: HotkeyMode = .hold
+    private var shortcut: HotkeyShortcut?
+
+    var onKeyDown: (() -> Void)?
+    var onKeyUp: (() -> Void)?
+
+    deinit { unregister() }
+
+    func setMode(_ mode: HotkeyMode) { self.mode = mode }
+
+    @discardableResult
+    func register(shortcut raw: String) -> Bool {
+        unregister()
+        configuredShortcut = raw
+        switch HotkeyShortcut.parse(raw) {
+        case .failure(let err):
+            lastError = "invalid shortcut: \(err)"
+            isRegistered = false
+            print("[HotkeyManager] parse failed: \(err)")
+            return false
+        case .success(let sc):
+            shortcut = sc
+            if sc.isFn {
+                return registerFn()
+            } else {
+                return registerModifiers(with: sc)
+            }
+        }
     }
 
     func unregister() {
+        for m in globalMonitors { NSEvent.removeMonitor(m) }
+        for m in localMonitors { NSEvent.removeMonitor(m) }
+        globalMonitors.removeAll()
+        localMonitors.removeAll()
         isRegistered = false
+        isKeyDown = false
+    }
+
+    // MARK: - Fn (flagsChanged)
+
+    private func registerFn() -> Bool {
+        // Fn detection via flagsChanged globally + locally
+        let handler: (NSEvent) -> Void = { [weak self] event in self?.handleFn(event: event) }
+        if let g = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged], handler: handler) {
+            globalMonitors.append(g)
+        }
+        if let l = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged], handler: { [weak self] e in self?.handleFn(event: e); return e }) {
+            localMonitors.append(l)
+        }
+        isRegistered = !globalMonitors.isEmpty || !localMonitors.isEmpty
+        if isRegistered {
+            print("[HotkeyManager] registered fn (hold)")
+        } else {
+            lastError = "failed to register fn"
+        }
+        return isRegistered
+    }
+
+    private func handleFn(event: NSEvent) {
+        let fnPressed = event.modifierFlags.contains(.function)
+        if fnPressed && !isKeyDown {
+            isKeyDown = true
+            DispatchQueue.main.async { [weak self] in self?.onKeyDown?() }
+        } else if !fnPressed && isKeyDown {
+            isKeyDown = false
+            DispatchQueue.main.async { [weak self] in self?.onKeyUp?() }
+        }
+    }
+
+    // MARK: - Modifier+key
+
+    private func registerModifiers(with sc: HotkeyShortcut) -> Bool {
+        guard let code = sc.keyCode else { return false }
+        let mods = sc.modifiers
+
+        let handler: (NSEvent) -> Void = { [weak self] event in
+            guard let self, let shortcut = self.shortcut else { return }
+            if event.type == .keyDown, !self.isKeyDown {
+                // Check modifiers + keyCode
+                if shortcut.matches(event: event) {
+                    self.isKeyDown = true
+                    if self.mode == .hold {
+                        DispatchQueue.main.async { self.onKeyDown?() }
+                    } else {
+                        // Toggle
+                        DispatchQueue.main.async {
+                            if self.isKeyDown { self.onKeyDown?() } 
+                        }
+                    }
+                }
+            } else if event.type == .keyUp, self.isKeyDown {
+                if event.keyCode == code {
+                    if self.mode == .hold {
+                        self.isKeyDown = false
+                        DispatchQueue.main.async { self.onKeyUp?() }
+                    } else {
+                        // Toggle: second press stops
+                        self.isKeyDown = false
+                        DispatchQueue.main.async { self.onKeyUp?() }
+                    }
+                }
+            }
+        }
+
+        // We need to match both keyDown and keyUp. Use separate monitors for clarity.
+        if let gDown = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown], handler: handler) {
+            globalMonitors.append(gDown)
+        }
+        if let gUp = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp], handler: handler) {
+            globalMonitors.append(gUp)
+        }
+        if let l = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp], handler: { e in handler(e); return e }) {
+            localMonitors.append(l)
+        }
+
+        isRegistered = !globalMonitors.isEmpty
+        lastError = isRegistered ? nil : "failed to register shortcut (conflict?)"
+        if isRegistered { print("[HotkeyManager] registered \(sc.raw) mods \(mods) code \(code)") }
+        return isRegistered
     }
 }
